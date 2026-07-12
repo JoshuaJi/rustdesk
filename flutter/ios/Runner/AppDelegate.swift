@@ -10,12 +10,32 @@ import GameController
   ) -> Bool {
     GeneratedPluginRegistrant.register(with: self)
     dummyMethodToEnforceBundling()
+
+    let ok = super.application(application, didFinishLaunchingWithOptions: launchOptions)
+
+    // Wire native keyboard-capture channel after Flutter window is ready.
+    if let controller = window?.rootViewController as? HardwareKeyboardCaptureViewController {
+      controller.setupChannel(messenger: controller.binaryMessenger)
+    } else if let controller = window?.rootViewController as? FlutterViewController {
+      // Fallback if storyboard class was not updated yet.
+      let channel = FlutterMethodChannel(
+        name: "org.rustdesk.rustdesk/ios_keyboard",
+        binaryMessenger: controller.binaryMessenger
+      )
+      channel.setMethodCallHandler { _, result in
+        result(FlutterError(
+          code: "unsupported",
+          message: "HardwareKeyboardCaptureViewController not installed",
+          details: nil
+        ))
+      }
+    }
+
     // Prefer hardware keyboard / pointer delivery for Bluetooth and Magic Keyboard.
-    // UIApplicationSupportsIndirectInputEvents is also set in Info.plist.
     if #available(iOS 14.0, *) {
       observeHardwareInputDevices()
     }
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    return ok
   }
 
   public func dummyMethodToEnforceBundling() {
@@ -23,9 +43,6 @@ import GameController
     session_get_rgba(nil, 0)
   }
 
-  /// Keep Flutter as first responder when Bluetooth keyboards/mice connect so
-  /// keystrokes reach the Dart HardwareKeyboard / Focus path without needing
-  /// the soft keyboard TextField.
   @available(iOS 14.0, *)
   private func observeHardwareInputDevices() {
     NotificationCenter.default.addObserver(
@@ -40,7 +57,6 @@ import GameController
       name: .GCMouseDidConnect,
       object: nil
     )
-    // If a keyboard is already connected at launch, reclaim first responder.
     if GCKeyboard.coalesced != nil {
       becomeKeyInputFirstResponder()
     }

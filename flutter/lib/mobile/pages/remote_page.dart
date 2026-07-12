@@ -22,6 +22,7 @@ import '../../models/input_model.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
 import '../../utils/image.dart';
+import '../../utils/ios_hardware_keyboard.dart';
 import '../widgets/dialog.dart';
 import '../widgets/custom_scale_widget.dart';
 
@@ -133,6 +134,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       // After the remote image is ready, prefer hardware keyboard input so
       // Bluetooth / Magic Keyboard can type without opening the soft keyboard.
       _ensurePhysicalKeyboardFocus();
+      // Claim iPadOS shortcuts (⌘C/V/…) and route them to the remote host.
+      if (isIOS) {
+        IosHardwareKeyboard.instance.attachSession(inputModel, enable: true);
+      }
     });
     WidgetsBinding.instance.addObserver(this);
     _installHardwareKeyboardHandler();
@@ -243,6 +248,9 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     _uninstallHardwareKeyboardHandler();
     _physicalFocusKeepAliveTimer?.cancel();
     _physicalFocusKeepAliveTimer = null;
+    if (isIOS) {
+      await IosHardwareKeyboard.instance.detachSession();
+    }
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
     // after several awaits (canvas save, image update, the `enable_soft_keyboard`
     // platform call), so if the app is backgrounded while this page is disposing,
@@ -362,6 +370,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
             _physicalFocusNode.requestFocus();
             // Also re-arm global hardware keyboard capture for BT keyboards.
             _ensurePhysicalKeyboardFocus();
+            // Soft keyboard closed: resume stealing system shortcuts for remote.
+            IosHardwareKeyboard.instance.setCaptureSystemShortcuts(true);
           });
         });
       } else {
@@ -370,6 +380,10 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     } else {
       _iosKeyboardWorkaroundTimer?.cancel();
       _iosKeyboardWorkaroundTimer = null;
+      // Soft keyboard needs normal iOS text input — release shortcut capture.
+      if (isIOS) {
+        IosHardwareKeyboard.instance.setCaptureSystemShortcuts(false);
+      }
       _timer?.cancel();
       _timer = Timer(kMobileDelaySoftKeyboardFocus, () {
         SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual,
@@ -721,6 +735,31 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                                   color: Colors.white,
                                   icon: Icon(Icons.keyboard),
                                   onPressed: openKeyboard),
+                              if (isIOS)
+                                Obx(() {
+                                  final on = IosHardwareKeyboard
+                                      .instance.captureEnabled.value;
+                                  return IconButton(
+                                    // Green = shortcuts go to remote host; white = iPad keeps them.
+                                    color: on
+                                        ? Colors.lightGreenAccent
+                                        : Colors.white,
+                                    tooltip: on
+                                        ? '⌘ shortcuts → remote (tap for iPad)'
+                                        : '⌘ shortcuts → iPad (tap for remote)',
+                                    icon: Icon(Icons.computer),
+                                    onPressed: () async {
+                                      await IosHardwareKeyboard.instance
+                                          .setCaptureSystemShortcuts(!on);
+                                      if (mounted) {
+                                        showToast(IosHardwareKeyboard
+                                                .instance.captureEnabled.value
+                                            ? '⌘ shortcuts → remote host'
+                                            : '⌘ shortcuts → iPad');
+                                      }
+                                    },
+                                  );
+                                }),
                               IconButton(
                                 color: Colors.white,
                                 icon: Icon(gFFI.ffiModel.touchMode
