@@ -2,9 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<key>aps-environment</key>
-	<string>development</string>
-	<key>com.apple.developer.networking.wifi-info</key>
-	<true/>
+	<!-- Push / Wi-Fi Info require a paid Apple Developer Program capability
+	     registration. Stripped for local personal-team side-load testing. -->
 </dict>
 </plist>

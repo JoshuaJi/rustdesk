@@ -793,6 +793,10 @@ class OverlayDialogManager {
   OverlayEntry? _mobileActionsOverlayEntry;
   RxBool mobileActionsOverlayVisible = true.obs;
 
+  /// True when no modal dialogs are open (password, options, etc.).
+  /// Used by hardware keyboard capture to avoid stealing keys from dialogs.
+  bool get dialogsIsEmpty => _dialogs.isEmpty;
+
   setMobileActionsOverlayVisible(bool v, {store = true}) {
     if (store) {
       bind.setLocalFlutterOption(k: kOptionShowMobileAction, v: v ? 'Y' : 'N');

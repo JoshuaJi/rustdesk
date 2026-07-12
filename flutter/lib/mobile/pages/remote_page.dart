@@ -66,6 +66,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   Orientation? _currentOrientation;
   final _uniqueKey = UniqueKey();
   Timer? _iosKeyboardWorkaroundTimer;
+  /// Periodically reclaims physical-keyboard focus on iOS so Bluetooth / Magic
+  /// Keyboard input keeps working without opening the soft keyboard.
+  Timer? _physicalFocusKeepAliveTimer;
+  /// True while the global HardwareKeyboard handler is delivering an event so
+  /// Focus.onKeyEvent does not double-send the same keystroke.
+  bool _handlingHardwareKey = false;
+  bool _hardwareKeyHandlerInstalled = false;
 
   final _blockableOverlayState = BlockableOverlayState();
 
@@ -104,6 +111,7 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.manual, overlays: []);
       gFFI.dialogManager
           .showLoading(translate('Connecting...'), onCancel: closeConnection);
+      _ensurePhysicalKeyboardFocus();
     });
     WakelockManager.enable(_uniqueKey);
     _physicalFocusNode.requestFocus();
@@ -122,8 +130,13 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
       }
       _disableAndroidSoftKeyboard(
           isKeyboardVisible: keyboardVisibilityController.isVisible);
+      // After the remote image is ready, prefer hardware keyboard input so
+      // Bluetooth / Magic Keyboard can type without opening the soft keyboard.
+      _ensurePhysicalKeyboardFocus();
     });
     WidgetsBinding.instance.addObserver(this);
+    _installHardwareKeyboardHandler();
+    _startPhysicalFocusKeepAlive();
 
     inputModel.keyboardInputAllowed = true;
 
@@ -140,9 +153,84 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     }
   }
 
+  /// Whether hardware keyboard events should be forwarded to the remote peer
+  /// without requiring the soft keyboard TextField.
+  bool get _shouldCaptureHardwareKeyboard {
+    if (!mounted) return false;
+    // Soft keyboard owns text input while the edit field is shown.
+    if (_showEdit) return false;
+    if (keyboardVisibilityController.isVisible && _showEdit) return false;
+    // Password / option dialogs must still receive local key events.
+    if (!gFFI.dialogManager.dialogsIsEmpty) return false;
+    // Wait until the peer session is established (same gate as RawKeyFocusScope).
+    if (gFFI.ffiModel.pi.isSet.isFalse) return false;
+    if (inputModel.isViewOnly) return false;
+    if (inputModel.isViewCamera) return false;
+    return true;
+  }
+
+  /// Global HardwareKeyboard path for Bluetooth / Magic Keyboard on mobile.
+  /// More reliable than Focus alone when no TextField is focused (no soft keyboard).
+  bool _onHardwareKeyEvent(KeyEvent event) {
+    if (!_shouldCaptureHardwareKeyboard) {
+      return false;
+    }
+    // Avoid re-entrancy / double delivery if Focus also sees the event.
+    if (_handlingHardwareKey) {
+      return true;
+    }
+    _handlingHardwareKey = true;
+    try {
+      inputModel.handleKeyEvent(event);
+    } finally {
+      _handlingHardwareKey = false;
+    }
+    return true;
+  }
+
+  void _installHardwareKeyboardHandler() {
+    if (_hardwareKeyHandlerInstalled) return;
+    // Mobile only: desktop already has a stable Focus / raw-key path.
+    if (!(isIOS || isAndroid)) return;
+    HardwareKeyboard.instance.addHandler(_onHardwareKeyEvent);
+    _hardwareKeyHandlerInstalled = true;
+  }
+
+  void _uninstallHardwareKeyboardHandler() {
+    if (!_hardwareKeyHandlerInstalled) return;
+    HardwareKeyboard.instance.removeHandler(_onHardwareKeyEvent);
+    _hardwareKeyHandlerInstalled = false;
+  }
+
+  /// Keep the physical focus node active so Flutter continues delivering
+  /// hardware key events without the soft keyboard.
+  void _ensurePhysicalKeyboardFocus() {
+    if (!mounted) return;
+    if (_showEdit) return;
+    if (keyboardVisibilityController.isVisible && _showEdit) return;
+    if (!_physicalFocusNode.hasFocus) {
+      _physicalFocusNode.requestFocus();
+    }
+  }
+
+  void _startPhysicalFocusKeepAlive() {
+    _physicalFocusKeepAliveTimer?.cancel();
+    if (!(isIOS || isAndroid)) return;
+    // Lightweight reclaim: focus can be stolen by overlays / system UI on iPad.
+    _physicalFocusKeepAliveTimer =
+        Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!mounted) return;
+      if (_showEdit || keyboardVisibilityController.isVisible) return;
+      _ensurePhysicalKeyboardFocus();
+    });
+  }
+
   @override
   Future<void> dispose() async {
     WidgetsBinding.instance.removeObserver(this);
+    _uninstallHardwareKeyboardHandler();
+    _physicalFocusKeepAliveTimer?.cancel();
+    _physicalFocusKeepAliveTimer = null;
     // Close the session up-front. `gFFI.close()` below only calls `sessionClose`
     // after several awaits (canvas save, image update, the `enable_soft_keyboard`
     // platform call), so if the app is backgrounded while this page is disposing,
@@ -182,6 +270,8 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       trySyncClipboard();
+      // Reclaim hardware keyboard focus after returning from background.
+      _ensurePhysicalKeyboardFocus();
     }
   }
 
@@ -258,8 +348,12 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
           _iosKeyboardWorkaroundTimer = Timer(Duration(milliseconds: 50), () {
             if (!mounted) return;
             _physicalFocusNode.requestFocus();
+            // Also re-arm global hardware keyboard capture for BT keyboards.
+            _ensurePhysicalKeyboardFocus();
           });
         });
+      } else {
+        _ensurePhysicalKeyboardFocus();
       }
     } else {
       _iosKeyboardWorkaroundTimer?.cancel();
@@ -515,14 +609,23 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
                                   gFFI.canvasModel.updateViewStyle();
                                 });
                               }
+                              // On iOS/iPadOS, keep touch gestures while a Bluetooth
+                              // / Magic Keyboard trackpad mouse is connected so
+                              // fingers and the pointer both work. RawTouchGesture
+                              // already ignores non-touch pointer kinds, and
+                              // InputModel filters Magic Mouse duplicate taps.
+                              // Desktop/web still drop touch gestures when a
+                              // physical mouse is the active input source.
+                              final useTouchGestures =
+                                  !inputModel.isPhysicalMouse.value || isIOS;
                               return Container(
                                 color: MyTheme.canvasColor,
-                                child: inputModel.isPhysicalMouse.value
-                                    ? getBodyForMobile()
-                                    : RawTouchGestureDetectorRegion(
+                                child: useTouchGestures
+                                    ? RawTouchGestureDetectorRegion(
                                         child: getBodyForMobile(),
                                         ffi: gFFI,
-                                      ),
+                                      )
+                                    : getBodyForMobile(),
                               );
                             }),
                           ),
@@ -536,14 +639,23 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
 
   Widget getRawPointerAndKeyBody(Widget child) {
     final ffiModel = Provider.of<FfiModel>(context);
+    // Reclaim hardware-keyboard focus on pointer activity so Bluetooth keyboard
+    // and mouse keep working after system UI steals first-responder status.
     return RawPointerMouseRegion(
       cursor: ffiModel.keyboard ? SystemMouseCursors.none : MouseCursor.defer,
       inputModel: inputModel,
+      onPointerDown: (_) {
+        if (!_showEdit) {
+          _ensurePhysicalKeyboardFocus();
+        }
+      },
       // Disable RawKeyFocusScope before the connecting is established.
       // The "Delete" key on the soft keyboard may be grabbed when inputting the password dialog.
       child: gFFI.ffiModel.pi.isSet.isTrue
           ? RawKeyFocusScope(
               focusNode: _physicalFocusNode,
+              // When the global HardwareKeyboard handler already delivered this
+              // event, skip Focus so the remote host does not get double keys.
               inputModel: inputModel,
               child: child)
           : child,

@@ -32,6 +32,12 @@ class RawKeyFocusScope extends StatelessWidget {
     final useRawKeyEvents = isLinux && !isWeb;
     // FIXME: On Windows, `AltGr` will generate `Alt` and `Control` key events,
     // while `Alt` and `Control` are separated key events for en-US input method.
+    //
+    // On mobile, RemotePage also installs a HardwareKeyboard.instance handler so
+    // Bluetooth / Magic Keyboard keys work without the soft keyboard TextField.
+    // That handler runs first and returns true when it consumes the event; Focus
+    // then skips, so we do not double-send. When the soft keyboard is open the
+    // global handler returns false and this Focus path still works as before.
     return FocusScope(
         autofocus: true,
         child: Focus(
