@@ -169,13 +169,25 @@ class _RemotePageState extends State<RemotePage> with WidgetsBindingObserver {
     return true;
   }
 
-  /// Global HardwareKeyboard path for Bluetooth / Magic Keyboard on mobile.
-  /// More reliable than Focus alone when no TextField is focused (no soft keyboard).
+  /// Fallback HardwareKeyboard path for Bluetooth / Magic Keyboard on mobile.
+  ///
+  /// Flutter invokes *every* HardwareKeyboard handler (returning true does not
+  /// suppress Focus). If we always handle here *and* Focus.onKeyEvent also
+  /// calls [InputModel.handleKeyEvent], the remote host gets each key twice.
+  ///
+  /// Rule:
+  /// - Physical focus has focus → Focus path owns the event (return false).
+  /// - Physical focus lost → we own the event so typing still works without
+  ///   the soft keyboard (return true after sending once).
   bool _onHardwareKeyEvent(KeyEvent event) {
     if (!_shouldCaptureHardwareKeyboard) {
       return false;
     }
-    // Avoid re-entrancy / double delivery if Focus also sees the event.
+    // Focus widget with [_physicalFocusNode] will deliver the same KeyEvent.
+    // Do not send a second copy.
+    if (_physicalFocusNode.hasFocus) {
+      return false;
+    }
     if (_handlingHardwareKey) {
       return true;
     }

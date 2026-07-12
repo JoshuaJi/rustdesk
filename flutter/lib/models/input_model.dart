@@ -478,6 +478,13 @@ class InputModel {
   // It should not block physical keyboard events.
   bool keyboardInputAllowed = true;
 
+  // Deduplicate identical KeyEvents when both Focus and HardwareKeyboard
+  // handlers deliver the same physical press (iOS Bluetooth keyboard double
+  // character bug). Same timeStamp + physical key + event type = one send.
+  Duration? _lastMobileKeyTimeStamp;
+  int? _lastMobileKeyUsbHid;
+  Type? _lastMobileKeyEventType;
+
   bool get keyboardPerm => parent.target!.ffiModel.keyboard;
   String get id => parent.target?.id ?? '';
   String? get peerPlatform => parent.target?.ffiModel.pi.platform;
@@ -836,6 +843,20 @@ class InputModel {
           e.physicalKey == PhysicalKeyboardKey.metaRight) {
         return KeyEventResult.handled;
       }
+    }
+
+    // Mobile: drop duplicate delivery of the same hardware key event.
+    // Happens when Focus.onKeyEvent and HardwareKeyboard.addHandler both fire.
+    if (isMobile) {
+      final usbHid = e.physicalKey.usbHidUsage;
+      if (_lastMobileKeyTimeStamp == e.timeStamp &&
+          _lastMobileKeyUsbHid == usbHid &&
+          _lastMobileKeyEventType == e.runtimeType) {
+        return KeyEventResult.handled;
+      }
+      _lastMobileKeyTimeStamp = e.timeStamp;
+      _lastMobileKeyUsbHid = usbHid;
+      _lastMobileKeyEventType = e.runtimeType;
     }
 
     if (_relativeMouse.handleKeyEvent(
