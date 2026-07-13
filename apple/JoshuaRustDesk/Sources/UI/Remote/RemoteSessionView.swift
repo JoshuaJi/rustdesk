@@ -377,12 +377,23 @@ struct RemoteSessionView: View {
             }
             Text("·")
                 .foregroundStyle(.white.opacity(0.35))
-            Text(session.audioMuted ? "MUTE" : (RemoteAudioPlayer.shared.framesReceived > 0 ? "AUD" : "…"))
+            let aud = RemoteAudioPlayer.shared
+            let label: String = {
+                if session.audioMuted { return "MUTE" }
+                if aud.framesReceived > 0 {
+                    // Peak tip: 0.00 ≈ silent decode; >0.01 ≈ real signal.
+                    return aud.lastPeak > 0.01 ? "AUD" : "AUD₀"
+                }
+                return "…"
+            }()
+            Text(label)
                 .font(.caption2.weight(.bold))
                 .foregroundStyle(
                     session.audioMuted
                         ? .orange
-                        : (RemoteAudioPlayer.shared.framesReceived > 0 ? .green : .white.opacity(0.5))
+                        : (aud.framesReceived > 0
+                            ? (aud.lastPeak > 0.01 ? .green : .yellow)
+                            : .white.opacity(0.5))
                 )
         }
         .padding(.horizontal, 12)

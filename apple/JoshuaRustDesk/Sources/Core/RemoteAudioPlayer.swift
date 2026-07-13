@@ -2,63 +2,77 @@ import AudioToolbox
 import AVFoundation
 import Foundation
 
-/// Remote desktop audio: Rust Opus → interleaved f32 → AudioQueue.
+/// Remote desktop audio: Rust Opus → f32 PCM → **Int16 AudioQueue @ 48 kHz stereo**.
 ///
-/// Always plays at **48 kHz stereo** (resampling on the way in) so the hardware
-/// path is consistent. AUD in the HUD means PCM arrived; this file is responsible
-/// for actually emitting it.
+/// Critical fixes vs prior silent builds:
+/// 1. Re-enqueue with callback's `inAQ` (not `self.queue`, which was nil during Start race).
+/// 2. Assign `self.queue` **before** `AudioQueueStart`.
+/// 3. Prebuffer ~150 ms before Start so we don't only play silence primes.
+/// 4. Int16 interleaved (most reliable on iOS hardware path).
+/// 5. Test beep on connect proves speaker path works.
 final class RemoteAudioPlayer {
     static let shared = RemoteAudioPlayer()
 
-    // Output format (fixed for the queue lifetime).
     private let outRate: Double = 48_000
-    private let outChannels: UInt32 = 2
-    private var outBytesPerFrame: UInt32 { outChannels * 4 }
+    private let outCh: Int = 2
+    private var outBytesPerFrame: UInt32 { UInt32(outCh * 2) }
 
     private let lock = NSLock()
-    /// Interleaved stereo f32 @ outRate.
-    private var ring: [Float] = []
-    private let maxRingSamples = 48_000 * 2 * 4 // 4s
-
-    private var inRate: Double = 0
-    private var inChannels: Int = 0
+    /// Circular buffer of interleaved Int16 stereo @ 48k.
+    private var ring: [Int16]
+    private var ringRead = 0
+    private var ringWrite = 0
+    private var ringCount = 0
+    private let ringCapacity: Int
 
     private var queue: AudioQueueRef?
-    private var aqBuffers: [AudioQueueBufferRef] = []
-    private let bufferCount = 5
-    private let bufferFrames: UInt32 = 960 // 20ms @ 48k
     private var running = false
+    private var starting = false
     private var localMuted = false
+
+    private let framesPerBuffer = 960 // 20 ms
+    private let bufferCount = 5
+    private let prebufferFrames = 48_000 / 6 // ~167 ms stereo frames → samples = *2
 
     private(set) var framesReceived: UInt64 = 0
     private(set) var callbacksReceived: UInt64 = 0
-    private var lastPeak: Float = 0
+    private(set) var lastPeak: Float = 0
+    private(set) var fillCount: UInt64 = 0
+    private(set) var underruns: UInt64 = 0
 
-    private init() {}
+    private init() {
+        // 4 seconds of stereo Int16
+        ringCapacity = 48_000 * 2 * 4
+        ring = [Int16](repeating: 0, count: ringCapacity)
+    }
 
     // MARK: - Public
 
     func start() {
         configureSession()
         registerRustCallback()
-        // Pre-create 48k queue so the first packets aren't delayed/dropped.
+        // Don't Start queue yet — wait for prebuffer OR start with beep for diagnostics.
         DispatchQueue.main.async { [weak self] in
-            self?.ensureQueue()
+            // Immediate beep proves the speaker; then we keep the queue running for PCM.
+            self?.startQueue(withBeep: true)
         }
         NSLog("RemoteAudioPlayer: start")
     }
 
     func stop() {
         clearRustCallback()
-        let stop = { [weak self] in self?.disposeQueue() }
-        if Thread.isMainThread { stop() } else { DispatchQueue.main.sync(execute: stop) }
+        let work = { [weak self] in self?.disposeQueue() }
+        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
         lock.lock()
-        ring.removeAll(keepingCapacity: true)
+        ringRead = 0
+        ringWrite = 0
+        ringCount = 0
         framesReceived = 0
         callbacksReceived = 0
-        inRate = 0
-        inChannels = 0
+        fillCount = 0
+        underruns = 0
         lastPeak = 0
+        starting = false
         lock.unlock()
     }
 
@@ -69,12 +83,14 @@ final class RemoteAudioPlayer {
         }
         if muted {
             lock.lock()
-            ring.removeAll(keepingCapacity: true)
+            ringRead = 0
+            ringWrite = 0
+            ringCount = 0
             lock.unlock()
         }
     }
 
-    // MARK: - PCM from Rust (decode thread) — any rate/channels
+    // MARK: - From Rust (any thread)
 
     fileprivate func enqueue(samples: UnsafePointer<Float>, count: Int, rate: UInt32, ch: UInt16) {
         guard count > 0, ch > 0, rate >= 8000 else { return }
@@ -84,20 +100,16 @@ final class RemoteAudioPlayer {
         let framesIn = count / chIn
         guard framesIn > 0 else { return }
 
-        // Peak for diagnostics (is the signal silent zeros?).
         var peak: Float = 0
         for i in 0..<min(count, 512) {
             peak = max(peak, abs(samples[i]))
         }
 
-        // Resample + upmix/downmix → stereo @ 48k interleaved.
-        let converted = Self.convert(
+        let s16 = Self.toInt16Stereo48k(
             samples: samples,
             framesIn: framesIn,
             chIn: chIn,
-            rateIn: Double(rate),
-            rateOut: outRate,
-            chOut: Int(outChannels)
+            rateIn: Double(rate)
         )
 
         lock.lock()
@@ -105,77 +117,84 @@ final class RemoteAudioPlayer {
         let n = callbacksReceived
         framesReceived &+= UInt64(framesIn)
         lastPeak = max(lastPeak * 0.9, peak)
-        inRate = Double(rate)
-        inChannels = chIn
-        ring.append(contentsOf: converted)
-        if ring.count > maxRingSamples {
-            ring.removeFirst(ring.count - maxRingSamples)
-        }
-        let ringN = ring.count
-        let needQueue = !running
+        writeRing(s16)
+        let bufferedFrames = ringCount / outCh
+        let isRunning = running
+        let isStarting = starting
+        let peakSnap = lastPeak
         lock.unlock()
 
-        if n == 1 || n % 100 == 0 {
+        if n == 1 || n % 40 == 0 {
             NSLog(
-                "RemoteAudioPlayer: pcm#\(n) in=\(rate)Hz×\(ch) peak=\(String(format: "%.4f", peak)) ring=\(ringN) run=\(running)"
+                "RemoteAudioPlayer: pcm#\(n) \(rate)Hz×\(ch) peak=\(String(format: "%.4f", peakSnap)) bufFrames=\(bufferedFrames) run=\(isRunning)"
             )
         }
 
-        if needQueue {
+        if !isRunning && !isStarting && bufferedFrames >= prebufferFrames {
             DispatchQueue.main.async { [weak self] in
-                self?.ensureQueue()
+                self?.startQueue(withBeep: false)
             }
         }
     }
 
-    // MARK: - Resample (linear) + channel map → stereo interleaved
+    // MARK: - Ring (O(1) write/read)
 
-    private static func convert(
+    private func writeRing(_ samples: [Int16]) {
+        for s in samples {
+            if ringCount >= ringCapacity {
+                // Drop oldest sample pair-ish: advance read
+                ringRead = (ringRead + 1) % ringCapacity
+                ringCount -= 1
+            }
+            ring[ringWrite] = s
+            ringWrite = (ringWrite + 1) % ringCapacity
+            ringCount += 1
+        }
+    }
+
+    private func readRing(into dst: UnsafeMutablePointer<Int16>, count: Int) -> Int {
+        let n = min(count, ringCount)
+        for i in 0..<n {
+            dst[i] = ring[ringRead]
+            ringRead = (ringRead + 1) % ringCapacity
+        }
+        ringCount -= n
+        return n
+    }
+
+    // MARK: - Convert
+
+    private static func toInt16Stereo48k(
         samples: UnsafePointer<Float>,
         framesIn: Int,
         chIn: Int,
-        rateIn: Double,
-        rateOut: Double,
-        chOut: Int
-    ) -> [Float] {
-        if framesIn <= 0 { return [] }
-
-        // Fast path: already 48k stereo interleaved — still apply make-up gain.
-        if abs(rateIn - rateOut) < 1, chIn == chOut {
-            var a = Array(UnsafeBufferPointer(start: samples, count: framesIn * chIn))
-            for i in a.indices {
-                a[i] = max(-1, min(1, a[i] * 2.5))
-            }
-            return a
-        }
-
+        rateIn: Double
+    ) -> [Int16] {
+        let rateOut = 48_000.0
         let framesOut = max(1, Int((Double(framesIn) * rateOut / rateIn).rounded()))
-        var out = [Float](repeating: 0, count: framesOut * chOut)
+        var out = [Int16](repeating: 0, count: framesOut * 2)
         let ratio = rateIn / rateOut
+        let gain: Float = 5.0
 
         for fo in 0..<framesOut {
             let srcPos = Double(fo) * ratio
-            let i0 = min(framesIn - 1, Int(srcPos))
+            let i0 = min(framesIn - 1, max(0, Int(srcPos)))
             let i1 = min(framesIn - 1, i0 + 1)
             let frac = Float(srcPos - Double(i0))
 
-            // Mix input channels to mono first, then duplicate to stereo (simple & clear).
             var m0: Float = 0
             var m1: Float = 0
             for c in 0..<chIn {
                 m0 += samples[i0 * chIn + c]
                 m1 += samples[i1 * chIn + c]
             }
-            m0 /= Float(chIn)
-            m1 /= Float(chIn)
-            // Mild make-up gain — remote Opus is often quiet vs local media.
-            var mono = (m0 + (m1 - m0) * frac) * 2.5
+            m0 /= Float(max(1, chIn))
+            m1 /= Float(max(1, chIn))
+            var mono = (m0 + (m1 - m0) * frac) * gain
             mono = max(-1, min(1, mono))
-
-            let base = fo * chOut
-            for c in 0..<chOut {
-                out[base + c] = mono
-            }
+            let s = Int16((mono * 32767).rounded())
+            out[fo * 2] = s
+            out[fo * 2 + 1] = s
         }
         return out
     }
@@ -185,82 +204,105 @@ final class RemoteAudioPlayer {
     private func configureSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            // moviePlayback tends to route more aggressively to speakers.
-            try session.setCategory(.playback, mode: .moviePlayback, options: [])
+            try session.setCategory(.playback, mode: .default, options: [])
             try session.setPreferredSampleRate(outRate)
             try session.setPreferredIOBufferDuration(0.02)
             try session.setActive(true)
+            try? session.overrideOutputAudioPort(.speaker)
         } catch {
-            do {
-                try session.setCategory(.playback)
-                try session.setActive(true)
-            } catch {
-                NSLog("RemoteAudioPlayer: session error \(error)")
-            }
+            NSLog("RemoteAudioPlayer: session error \(error)")
+            try? session.setCategory(.playback)
+            try? session.setActive(true)
         }
+        let outs = session.currentRoute.outputs.map { "\($0.portType.rawValue):\($0.portName)" }
+        NSLog("RemoteAudioPlayer: session ok rate=\(session.sampleRate) outs=\(outs)")
     }
 
-    // MARK: - AudioQueue @ 48k stereo float
+    // MARK: - AudioQueue
 
-    private func ensureQueue() {
+    private func startQueue(withBeep: Bool) {
         precondition(Thread.isMainThread)
-        if running, queue != nil { return }
+        lock.lock()
+        if running {
+            lock.unlock()
+            return
+        }
+        starting = true
+        lock.unlock()
+
         disposeQueue()
         configureSession()
 
         var asbd = AudioStreamBasicDescription(
             mSampleRate: outRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagsNativeFloatPacked,
+            mFormatFlags: kLinearPCMFormatFlagIsSignedInteger
+                | kLinearPCMFormatFlagIsPacked,
             mBytesPerPacket: outBytesPerFrame,
             mFramesPerPacket: 1,
             mBytesPerFrame: outBytesPerFrame,
-            mChannelsPerFrame: outChannels,
-            mBitsPerChannel: 32,
+            mChannelsPerFrame: UInt32(outCh),
+            mBitsPerChannel: 16,
             mReserved: 0
         )
 
         var q: AudioQueueRef?
         let user = Unmanaged.passUnretained(self).toOpaque()
-        var status = AudioQueueNewOutput(
-            &asbd,
-            aqCallback,
-            user,
-            nil,
-            nil,
-            0,
-            &q
-        )
-        guard status == noErr, let queue = q else {
-            NSLog("RemoteAudioPlayer: AudioQueueNewOutput \(status)")
+        var st = AudioQueueNewOutput(&asbd, aqCallback, user, nil, nil, 0, &q)
+        guard st == noErr, let queue = q else {
+            NSLog("RemoteAudioPlayer: NewOutput failed \(st)")
+            lock.lock(); starting = false; lock.unlock()
             return
         }
 
-        // Full volume.
+        // CRITICAL: publish queue BEFORE Start so early callbacks can re-enqueue.
+        self.queue = queue
         AudioQueueSetParameter(queue, kAudioQueueParam_Volume, localMuted ? 0 : 1)
 
-        let bufBytes = bufferFrames * outBytesPerFrame
-        aqBuffers.removeAll()
-        for _ in 0..<bufferCount {
+        let bufBytes = UInt32(framesPerBuffer) * outBytesPerFrame
+        for i in 0..<bufferCount {
             var buf: AudioQueueBufferRef?
-            status = AudioQueueAllocateBuffer(queue, bufBytes, &buf)
-            guard status == noErr, let buf else { continue }
-            aqBuffers.append(buf)
-            // Prime
-            memset(buf.pointee.mAudioData, 0, Int(bufBytes))
-            buf.pointee.mAudioDataByteSize = bufBytes
-            AudioQueueEnqueueBuffer(queue, buf, 0, nil)
+            st = AudioQueueAllocateBuffer(queue, bufBytes, &buf)
+            guard st == noErr, let buf else {
+                NSLog("RemoteAudioPlayer: AllocBuffer[\(i)] \(st)")
+                continue
+            }
+            if withBeep, i == 0 {
+                writeBeep(buf)
+            } else {
+                // Pull whatever is buffered, or silence.
+                fillBuffer(aq: queue, buffer: buf)
+            }
         }
 
-        status = AudioQueueStart(queue, nil)
-        if status == noErr {
-            self.queue = queue
+        st = AudioQueueStart(queue, nil)
+        if st == noErr {
+            lock.lock()
             running = true
-            NSLog("RemoteAudioPlayer: AudioQueue 48k stereo started (bufs=\(aqBuffers.count))")
+            starting = false
+            lock.unlock()
+            NSLog("RemoteAudioPlayer: STARTED s16 48k stereo beep=\(withBeep)")
         } else {
-            NSLog("RemoteAudioPlayer: AudioQueueStart \(status)")
-            AudioQueueDispose(queue, true)
-            running = false
+            NSLog("RemoteAudioPlayer: Start FAILED \(st)")
+            disposeQueue()
+            lock.lock(); starting = false; lock.unlock()
+        }
+    }
+
+    private func writeBeep(_ buffer: AudioQueueBufferRef) {
+        let frames = framesPerBuffer
+        let dst = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
+        let freq = 880.0
+        let amp: Double = 0.35
+        for f in 0..<frames {
+            let t = Double(f) / outRate
+            let s = Int16(sin(2 * Double.pi * freq * t) * amp * 32767)
+            dst[f * 2] = s
+            dst[f * 2 + 1] = s
+        }
+        buffer.pointee.mAudioDataByteSize = UInt32(frames) * outBytesPerFrame
+        if let queue {
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
         }
     }
 
@@ -270,36 +312,39 @@ final class RemoteAudioPlayer {
             AudioQueueDispose(queue, true)
         }
         queue = nil
-        aqBuffers.removeAll()
+        lock.lock()
         running = false
+        starting = false
+        lock.unlock()
     }
 
-    /// Realtime AudioQueue thread: pull stereo@48k from ring into buffer.
-    fileprivate func fill(buffer: AudioQueueBufferRef) {
-        let frames = Int(bufferFrames)
-        let ch = Int(outChannels)
-        let need = frames * ch
-        let dst = buffer.pointee.mAudioData.assumingMemoryBound(to: Float.self)
+    /// Realtime callback path — always re-enqueue via `aq` argument.
+    fileprivate func fillBuffer(aq: AudioQueueRef, buffer: AudioQueueBufferRef) {
+        let need = framesPerBuffer * outCh
+        let dst = buffer.pointee.mAudioData.assumingMemoryBound(to: Int16.self)
 
         lock.lock()
-        let available = min(need, ring.count)
-        if available > 0 {
-            for i in 0..<available {
-                dst[i] = ring[i]
-            }
-            ring.removeFirst(available)
+        fillCount &+= 1
+        let fc = fillCount
+        let got = readRing(into: dst, count: need)
+        if got < need {
+            underruns &+= 1
+            for i in got..<need { dst[i] = 0 }
         }
+        let und = underruns
+        let peak = lastPeak
         lock.unlock()
 
-        if available < need {
-            for i in available..<need {
-                dst[i] = 0
-            }
+        buffer.pointee.mAudioDataByteSize = UInt32(need * MemoryLayout<Int16>.size)
+
+        // CRITICAL: use callback's queue ref, never optional self.queue.
+        let st = AudioQueueEnqueueBuffer(aq, buffer, 0, nil)
+        if st != noErr {
+            NSLog("RemoteAudioPlayer: re-enqueue \(st)")
         }
 
-        buffer.pointee.mAudioDataByteSize = bufferFrames * outBytesPerFrame
-        if let queue {
-            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        if fc == 1 || fc % 250 == 0 {
+            NSLog("RemoteAudioPlayer: fill#\(fc) got=\(got)/\(need) und=\(und) peak=\(String(format: "%.3f", peak))")
         }
     }
 
@@ -308,6 +353,7 @@ final class RemoteAudioPlayer {
     private func registerRustCallback() {
         let user = Unmanaged.passUnretained(self).toOpaque()
         rd_set_pcm_callback(pcmTrampoline, user)
+        NSLog("RemoteAudioPlayer: callback registered")
     }
 
     private func clearRustCallback() {
@@ -325,12 +371,14 @@ private let pcmTrampoline: @convention(c) (
     UInt16
 ) -> Void = { user, samples, sampleCount, sampleRate, channels in
     guard let user, let samples, sampleCount > 0 else { return }
-    let player = Unmanaged<RemoteAudioPlayer>.fromOpaque(user).takeUnretainedValue()
-    player.enqueue(samples: samples, count: sampleCount, rate: sampleRate, ch: channels)
+    Unmanaged<RemoteAudioPlayer>.fromOpaque(user)
+        .takeUnretainedValue()
+        .enqueue(samples: samples, count: sampleCount, rate: sampleRate, ch: channels)
 }
 
-private let aqCallback: AudioQueueOutputCallback = { user, _, buffer in
+private let aqCallback: AudioQueueOutputCallback = { user, inAQ, buffer in
     guard let user else { return }
-    let player = Unmanaged<RemoteAudioPlayer>.fromOpaque(user).takeUnretainedValue()
-    player.fill(buffer: buffer)
+    Unmanaged<RemoteAudioPlayer>.fromOpaque(user)
+        .takeUnretainedValue()
+        .fillBuffer(aq: inAQ, buffer: buffer)
 }
