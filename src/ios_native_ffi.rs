@@ -329,6 +329,33 @@ pub extern "C" fn rd_session_toggle_option(session_uuid: *const c_char, name: *c
     session_toggle_option(sid, cstring_or_empty(name));
 }
 
+/// PCM callback for pure-Swift remote audio playback.
+/// `samples` is interleaved f32, length `sample_count` (= frames * channels).
+/// Called from the audio decode thread — copy quickly, do not block.
+pub type RdPcmCb = Option<
+    extern "C" fn(
+        user: *mut c_void,
+        samples: *const f32,
+        sample_count: usize,
+        sample_rate: u32,
+        channels: u16,
+    ),
+>;
+
+/// Register iOS PCM sink. Pass `cb = None` (null) to clear.
+/// When set, Opus is decoded in Rust and PCM is delivered here instead of cpal.
+#[no_mangle]
+pub extern "C" fn rd_set_pcm_callback(cb: RdPcmCb, user: *mut c_void) {
+    #[cfg(target_os = "ios")]
+    {
+        crate::client::set_ios_pcm_callback(cb, user);
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (cb, user);
+    }
+}
+
 /// Returns 1 if option is on, 0 if off/unknown.
 #[no_mangle]
 pub extern "C" fn rd_session_get_toggle_option(
@@ -418,6 +445,7 @@ pub extern "C" fn rd_force_link() {
         rd_session_set_codec_preference as *const (),
         rd_session_send_clipboard as *const (),
         rd_session_switch_display as *const (),
+        rd_set_pcm_callback as *const (),
         rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),
     );

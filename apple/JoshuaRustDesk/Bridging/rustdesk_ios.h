@@ -47,6 +47,13 @@ void rd_session_set_image_quality(const char *session_uuid, const char *value);
 char *rd_session_get_image_quality(const char *session_uuid);
 void rd_session_toggle_option(const char *session_uuid, const char *name);
 int rd_session_get_toggle_option(const char *session_uuid, const char *name);
+
+/// Interleaved f32 PCM from remote Opus decode (audio thread).
+/// sample_count = number of floats = frames * channels.
+typedef void (*rd_pcm_cb)(void *user, const float *samples, size_t sample_count,
+                          uint32_t sample_rate, uint16_t channels);
+/// Register Swift audio player. Pass NULL to clear.
+void rd_set_pcm_callback(rd_pcm_cb cb, void *user);
 void rd_session_set_peer_option(const char *session_uuid, const char *name, const char *value);
 /// Re-send supported decodings (VideoToolbox H264/H265) so host can switch codec.
 void rd_session_refresh_decodings(const char *session_uuid);

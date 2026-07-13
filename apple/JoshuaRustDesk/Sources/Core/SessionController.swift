@@ -50,6 +50,8 @@ final class SessionController: ObservableObject {
     @Published var qualityLabel: String = "Balanced"
     @Published var viewOnly: Bool = false
     @Published var showRemoteCursor: Bool = true
+    /// When true, remote desktop audio is muted (`disable-audio` on).
+    @Published var audioMuted: Bool = false
     /// Remote peer cursor (display coords) + image for overlay.
     @Published private(set) var cursorX: CGFloat = 0
     @Published private(set) var cursorY: CGFloat = 0
@@ -94,6 +96,8 @@ final class SessionController: ObservableObject {
     private var currentCursorId: String = ""
     /// Only auto-disable view-only once per connection (don't fight user's toggle).
     private var didEnsureControlMode = false
+    /// Only force-enable audio once per connection (don't fight mute).
+    private var didEnsureAudio = false
     /// Last text we wrote to / read from pasteboard for loop suppression.
     private var lastPushedClipboard: String = ""
     private var lastReceivedClipboard: String = ""
@@ -122,8 +126,12 @@ final class SessionController: ObservableObject {
         setStage("Looking up \(peerId)…")
         softKeyboardVisible = false
         viewOnly = false
+        audioMuted = false
         didEnsureControlMode = false
+        didEnsureAudio = false
         clearModifiers(sendKeyUp: false)
+        // Start remote audio path (Rust Opus → Swift PCM player).
+        RemoteAudioPlayer.shared.start()
         connectionSecure = false
         connectionDirect = false
         streamType = ""
@@ -226,6 +234,7 @@ final class SessionController: ObservableObject {
         }
         softKeyboardVisible = false
         stopPasteboardObserver()
+        RemoteAudioPlayer.shared.stop()
         // Release sticky modifiers on the peer while session is still active.
         if active {
             clearModifiers(sendKeyUp: true)
@@ -544,6 +553,26 @@ final class SessionController: ObservableObject {
         statusText = viewOnly ? "View only" : "Control enabled"
     }
 
+    /// Mute / unmute remote desktop audio (`disable-audio` peer option).
+    func toggleAudioMuted() {
+        guard active else { return }
+        rd_session_toggle_option(sessionUUID, "disable-audio")
+        // disable-audio ON means muted.
+        audioMuted = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
+        RemoteAudioPlayer.shared.setLocalMuted(audioMuted)
+        statusText = audioMuted ? "Audio muted" : "Audio on"
+    }
+
+    func setAudioMuted(_ muted: Bool) {
+        guard active else { return }
+        let currently = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
+        if currently != muted {
+            rd_session_toggle_option(sessionUUID, "disable-audio")
+        }
+        audioMuted = muted
+        RemoteAudioPlayer.shared.setLocalMuted(muted)
+    }
+
     /// Cursor mode when remote cursor is on; touch mode when off.
     var isCursorMode: Bool { showRemoteCursor }
 
@@ -562,12 +591,25 @@ final class SessionController: ObservableObject {
         ensureControlMode()
         // Sync mode from peer option (do not force either way).
         applyCursorModeFromPeer()
+        // Ensure audio is on by default for the session (unmute if peer config left it muted).
+        ensureAudioEnabled()
+        audioMuted = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
         if let p = rd_session_get_image_quality(sessionUUID) {
             let q = String(cString: p)
             rd_free_string(p)
             if !q.isEmpty {
                 qualityLabel = q.capitalized
             }
+        }
+    }
+
+    /// Prefer remote audio on for new sessions (once — respect later mute).
+    private func ensureAudioEnabled() {
+        guard !didEnsureAudio else { return }
+        didEnsureAudio = true
+        let disabled = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
+        if disabled {
+            rd_session_toggle_option(sessionUUID, "disable-audio")
         }
     }
 

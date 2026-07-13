@@ -178,6 +178,14 @@ struct RemoteSessionView: View {
                 }
             }
 
+            sidebarIconButton(
+                systemName: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
+                label: session.audioMuted ? "Unmute audio" : "Mute audio",
+                emphasized: !session.audioMuted
+            ) {
+                session.toggleAudioMuted()
+            }
+
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
             modButton("⌃", active: session.modControl, label: "Control") {

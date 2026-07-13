@@ -1178,6 +1178,54 @@ impl ClientClipboardHandler {
     }
 }
 
+/// iOS pure-Swift player: deliver decoded interleaved f32 PCM.
+/// `sample_count` is the number of f32 values (frames * channels).
+#[cfg(target_os = "ios")]
+pub type IosPcmCallback =
+    extern "C" fn(user: *mut std::ffi::c_void, samples: *const f32, sample_count: usize, sample_rate: u32, channels: u16);
+
+#[cfg(target_os = "ios")]
+struct IosPcmSink {
+    cb: IosPcmCallback,
+    /// Opaque user pointer stored as usize so the static is `Send`.
+    user: usize,
+}
+
+#[cfg(target_os = "ios")]
+static IOS_PCM_SINK: std::sync::Mutex<Option<IosPcmSink>> = std::sync::Mutex::new(None);
+
+/// Register (or clear with `None`) the iOS PCM playback callback.
+#[cfg(target_os = "ios")]
+pub fn set_ios_pcm_callback(cb: Option<IosPcmCallback>, user: *mut std::ffi::c_void) {
+    let mut g = IOS_PCM_SINK.lock().unwrap();
+    *g = cb.map(|cb| IosPcmSink {
+        cb,
+        user: user as usize,
+    });
+}
+
+#[cfg(target_os = "ios")]
+fn has_ios_pcm_callback() -> bool {
+    IOS_PCM_SINK.lock().unwrap().is_some()
+}
+
+#[cfg(target_os = "ios")]
+fn push_ios_pcm(samples: &[f32], sample_rate: u32, channels: u16) {
+    let g = IOS_PCM_SINK.lock().unwrap();
+    if let Some(sink) = g.as_ref() {
+        if samples.is_empty() {
+            return;
+        }
+        (sink.cb)(
+            sink.user as *mut std::ffi::c_void,
+            samples.as_ptr(),
+            samples.len(),
+            sample_rate,
+            channels,
+        );
+    }
+}
+
 /// Audio handler for the [`Client`].
 #[derive(Default)]
 pub struct AudioHandler {
@@ -1194,6 +1242,9 @@ pub struct AudioHandler {
     device_channel: u16,
     #[cfg(not(target_os = "linux"))]
     ready: Arc<std::sync::Mutex<bool>>,
+    /// When true on iOS, skip cpal and deliver PCM to Swift via callback.
+    #[cfg(target_os = "ios")]
+    ios_pcm_only: bool,
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1406,6 +1457,25 @@ impl AudioHandler {
                 let buffer = vec![0.; f.sample_rate as usize * f.channels as usize];
                 self.audio_decoder = Some((d, buffer));
                 self.channels = f.channels as _;
+                // iOS pure-Swift player: prefer PCM callback over cpal (cpal often
+                // stays silent without a carefully managed AVAudioSession, and
+                // fixed buffer sizes are already disabled on iOS).
+                #[cfg(target_os = "ios")]
+                {
+                    if has_ios_pcm_callback() {
+                        self.sample_rate = (f.sample_rate, f.sample_rate);
+                        self.device_channel = f.channels as _;
+                        self.ios_pcm_only = true;
+                        *self.ready.lock().unwrap() = true;
+                        log::info!(
+                            "iOS audio: PCM callback path @ {} Hz, {} ch",
+                            f.sample_rate,
+                            f.channels
+                        );
+                        return;
+                    }
+                    self.ios_pcm_only = false;
+                }
                 allow_err!(self.start_audio(f));
             }
             Err(err) => {
@@ -1417,8 +1487,17 @@ impl AudioHandler {
     /// Handle audio frame and play it.
     #[inline]
     pub fn handle_frame(&mut self, frame: AudioFrame) {
+        #[cfg(target_os = "ios")]
+        let ios_pcm = self.ios_pcm_only && has_ios_pcm_callback();
+        #[cfg(not(target_os = "ios"))]
+        let ios_pcm = false;
+
         #[cfg(not(target_os = "linux"))]
-        if self.audio_stream.is_none() || !self.ready.lock().unwrap().clone() {
+        if !ios_pcm && (self.audio_stream.is_none() || !self.ready.lock().unwrap().clone()) {
+            return;
+        }
+        #[cfg(target_os = "ios")]
+        if ios_pcm && self.audio_decoder.is_none() {
             return;
         }
         #[cfg(target_os = "linux")]
@@ -1430,6 +1509,12 @@ impl AudioHandler {
             if let Ok(n) = d.decode_float(&frame.data, buffer, false) {
                 let channels = self.channels;
                 let n = n * (channels as usize);
+                #[cfg(target_os = "ios")]
+                if ios_pcm {
+                    // Deliver at the remote sample rate (no cpal rechannel).
+                    push_ios_pcm(&buffer[0..n], self.sample_rate.0, channels);
+                    return;
+                }
                 #[cfg(not(target_os = "linux"))]
                 {
                     let sample_rate0 = self.sample_rate.0;
