@@ -240,6 +240,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     /// How much finger motion moves the remote cursor (trackpad feel).
     private let cursorSensitivity: CGFloat = 1.15
 
+    /// Touch-mode: track whether remote left button is held so we always release on lift.
+    private var touchModeLeftDown = false
+    private var lastRemoteX = 0
+    private var lastRemoteY = 0
+
     /// Remote-cursor ON → cursor/trackpad mode; OFF → absolute touch mode.
     private var isCursorMode: Bool { session?.showRemoteCursor == true }
 
@@ -658,6 +663,8 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
 
         if fingerCount >= 2 {
             cancelLongPress()
+            // Always release any held left button before multi-touch gestures.
+            releaseLeftButtonIfNeeded(at: touches.first.map { $0.location(in: self) })
             // Right-click if second finger lands without much prior drag (cursor mode).
             if isCursorMode, !fingerMoved, !leftHeldInCursorMode {
                 session?.clickAtCursor(button: "right")
@@ -668,12 +675,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             pinchStartZoom = userZoom
             panStartOffset = panOffset
             pinchStartDistance = 0
-            if !isCursorMode, let p = touches.first.map({ $0.location(in: self) }) {
-                sendMouse(type: "up", point: p, buttons: "left")
-            } else if leftHeldInCursorMode {
-                session?.mouseButtonAtCursor(type: "up", button: "left")
-                leftHeldInCursorMode = false
-            }
             return
         }
 
@@ -691,6 +692,8 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             scheduleLongPress()
         } else {
             // Touch mode: finger position IS the remote pointer (absolute).
+            // Ensure no stale hold from a previous interrupted gesture.
+            releaseLeftButtonIfNeeded(at: p)
             sendMouse(type: "down", point: p, buttons: "left")
         }
     }
@@ -699,9 +702,18 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        if activeTouches.count >= 2 || isPinching || isTwoFingerPanning {
+        // Only treat as multi when 2+ fingers are actually down (don't stick on stale flags).
+        if activeTouches.count >= 2 {
+            isTwoFingerPanning = true
             handleMultiTouch(Set(activeTouches.keys))
             return
+        }
+        // Stale multi flag with one finger left: drop back to single-finger handling.
+        if isPinching || isTwoFingerPanning {
+            isPinching = false
+            isTwoFingerPanning = false
+            lastTwoFingerMid = nil
+            pinchStartDistance = 0
         }
         guard let t = touches.first else { return }
         let p = t.location(in: self)
@@ -718,47 +730,84 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             lastFinger = p
             applyCursorModeDelta(dx: dx, dy: dy)
         } else {
+            // Keep absolute move while left is held (drag).
             sendMouse(type: "move", point: p, buttons: "")
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        let wasMulti = isPinching || isTwoFingerPanning || activeTouches.count > 1
+        let endPoint = touches.first.map { $0.location(in: self) }
         for t in touches { activeTouches.removeValue(forKey: t) }
         cancelLongPress()
 
-        if wasMulti {
-            if activeTouches.count < 2 {
-                isPinching = false
-                isTwoFingerPanning = false
-                lastTwoFingerMid = nil
-                pinchStartDistance = 0
-                wheelAccumulator = 0
-            }
-            fingerStart = nil
-            lastFinger = nil
+        let stillMulti = activeTouches.count >= 2
+        if stillMulti {
+            // Other fingers remain — don't end the single-finger gesture yet.
             return
         }
+
+        // All multi flags clear once we're back to 0–1 fingers.
+        isPinching = false
+        isTwoFingerPanning = false
+        lastTwoFingerMid = nil
+        pinchStartDistance = 0
+        wheelAccumulator = 0
 
         if isCursorMode {
             if leftHeldInCursorMode {
                 session?.mouseButtonAtCursor(type: "up", button: "left")
                 leftHeldInCursorMode = false
-            } else if !fingerMoved {
+            } else if !fingerMoved, activeTouches.isEmpty {
                 // Tap → left click at current cursor (not finger location).
                 session?.clickAtCursor(button: "left")
             }
-            // Else: trackpad pan only — cursor already moved.
             fingerStart = nil
             lastFinger = nil
             fingerMoved = false
-        } else if let t = touches.first {
-            sendMouse(type: "up", point: t.location(in: self), buttons: "left")
+        } else {
+            // Touch mode: ALWAYS release left on finger-up (fixes stuck-drag).
+            releaseLeftButtonIfNeeded(at: endPoint)
         }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        touchesEnded(touches, with: event)
+        let endPoint = touches.first.map { $0.location(in: self) }
+        for t in touches { activeTouches.removeValue(forKey: t) }
+        cancelLongPress()
+        isPinching = false
+        isTwoFingerPanning = false
+        lastTwoFingerMid = nil
+        pinchStartDistance = 0
+        wheelAccumulator = 0
+        fingerStart = nil
+        lastFinger = nil
+        fingerMoved = false
+        if leftHeldInCursorMode {
+            session?.mouseButtonAtCursor(type: "up", button: "left")
+            leftHeldInCursorMode = false
+        }
+        releaseLeftButtonIfNeeded(at: endPoint)
+    }
+
+    /// Send left-button up if touch-mode still thinks the button is down.
+    private func releaseLeftButtonIfNeeded(at point: CGPoint?) {
+        if leftHeldInCursorMode {
+            session?.mouseButtonAtCursor(type: "up", button: "left")
+            leftHeldInCursorMode = false
+        }
+        guard touchModeLeftDown else { return }
+        if let point {
+            sendMouse(type: "up", point: point, buttons: "left")
+        } else {
+            // Fall back to last known remote coords.
+            emit([
+                "x": "\(lastRemoteX)",
+                "y": "\(lastRemoteY)",
+                "type": "up",
+                "buttons": "left",
+            ])
+            touchModeLeftDown = false
+        }
     }
 
     private func scheduleLongPress() {
@@ -847,6 +896,8 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
 
     private func sendMouse(type: String, point: CGPoint, buttons: String) {
         let (x, y) = mapToRemote(point)
+        lastRemoteX = x
+        lastRemoteY = y
         var map: [String: String] = [
             "x": "\(x)",
             "y": "\(y)",
@@ -854,6 +905,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         if type != "move" {
             map["type"] = type
             map["buttons"] = buttons
+        }
+        if type == "down", buttons == "left" {
+            touchModeLeftDown = true
+        } else if type == "up", buttons == "left" {
+            touchModeLeftDown = false
         }
         emit(map)
     }
