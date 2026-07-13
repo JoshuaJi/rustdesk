@@ -1211,19 +1211,35 @@ fn has_ios_pcm_callback() -> bool {
 
 #[cfg(target_os = "ios")]
 fn push_ios_pcm(samples: &[f32], sample_rate: u32, channels: u16) {
-    let g = IOS_PCM_SINK.lock().unwrap();
-    if let Some(sink) = g.as_ref() {
-        if samples.is_empty() {
-            return;
+    if samples.is_empty() {
+        return;
+    }
+    // Copy callback out of the lock so Swift never re-enters while held.
+    let sink = {
+        let g = IOS_PCM_SINK.lock().unwrap();
+        match g.as_ref() {
+            Some(s) => (s.cb, s.user),
+            None => return,
         }
-        (sink.cb)(
-            sink.user as *mut std::ffi::c_void,
-            samples.as_ptr(),
+    };
+    static PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if n == 0 || n % 250 == 0 {
+        log::info!(
+            "iOS PCM push #{}: {} floats @ {} Hz × {} ch",
+            n,
             samples.len(),
             sample_rate,
-            channels,
+            channels
         );
     }
+    (sink.0)(
+        sink.1 as *mut std::ffi::c_void,
+        samples.as_ptr(),
+        samples.len(),
+        sample_rate,
+        channels,
+    );
 }
 
 /// Audio handler for the [`Client`].
@@ -1506,9 +1522,14 @@ impl AudioHandler {
             return;
         }
         self.audio_decoder.as_mut().map(|(d, buffer)| {
-            if let Ok(n) = d.decode_float(&frame.data, buffer, false) {
+            match d.decode_float(&frame.data, buffer, false) {
+                Ok(n) => {
                 let channels = self.channels;
                 let n = n * (channels as usize);
+                if n == 0 || n > buffer.len() {
+                    log::warn!("audio decode odd size n={n} buf={}", buffer.len());
+                    return;
+                }
                 #[cfg(target_os = "ios")]
                 if ios_pcm {
                     // Deliver at the remote sample rate (no cpal rechannel).
@@ -1544,6 +1565,10 @@ impl AudioHandler {
                     let data_u8 =
                         unsafe { std::slice::from_raw_parts::<u8>(buffer.as_ptr() as _, n * 4) };
                     self.simple.as_mut().map(|x| x.write(data_u8));
+                }
+                }
+                Err(e) => {
+                    log::trace!("audio decode failed: {e}");
                 }
             }
         });

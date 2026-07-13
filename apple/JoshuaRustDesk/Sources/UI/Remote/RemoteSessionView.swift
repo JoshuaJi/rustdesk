@@ -375,6 +375,15 @@ struct RemoteSessionView: View {
                     .font(.caption2)
                     .foregroundStyle(.orange)
             }
+            Text("·")
+                .foregroundStyle(.white.opacity(0.35))
+            Text(session.audioMuted ? "MUTE" : (RemoteAudioPlayer.shared.framesReceived > 0 ? "AUD" : "…"))
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(
+                    session.audioMuted
+                        ? .orange
+                        : (RemoteAudioPlayer.shared.framesReceived > 0 ? .green : .white.opacity(0.5))
+                )
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
