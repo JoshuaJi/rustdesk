@@ -109,6 +109,7 @@ final class SessionController: ObservableObject {
     private var lastPushedClipboard: String = ""
     private var lastReceivedClipboard: String = ""
     private var pasteboardObserver: NSObjectProtocol?
+    private var clipboardNoteWork: DispatchWorkItem?
     private var connectTimeoutWork: DispatchWorkItem?
     /// Seconds to wait for peer_info / frames before failing.
     private let connectTimeoutSeconds: TimeInterval = 45
@@ -149,6 +150,7 @@ final class SessionController: ObservableObject {
         qualityFPS = ""
         qualityDelay = ""
         qualityCodec = ""
+        clipboardNoteWork?.cancel()
         lastClipboardNote = ""
         lastPushedClipboard = ""
         lastReceivedClipboard = ""
@@ -503,17 +505,17 @@ final class SessionController: ObservableObject {
     /// Push local pasteboard → peer system clipboard.
     func pushClipboardToPeer() {
         guard active, !viewOnly else {
-            lastClipboardNote = "Not connected"
+            flashClipboardNote("Not connected")
             return
         }
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
             statusText = "Clipboard empty"
-            lastClipboardNote = "Clipboard empty"
+            flashClipboardNote("Clipboard empty")
             return
         }
         rd_session_send_clipboard(sessionUUID, text)
         statusText = "Clipboard → peer (\(text.count) chars)"
-        lastClipboardNote = "Pushed \(min(text.count, 999)) chars to peer"
+        flashClipboardNote("Pushed \(min(text.count, 999)) chars to peer")
         // Remember so auto-sync does not echo peer→local→peer.
         lastPushedClipboard = text
     }
@@ -522,12 +524,12 @@ final class SessionController: ObservableObject {
     func typeClipboardAsKeystrokes() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
             statusText = "Clipboard empty"
-            lastClipboardNote = "Clipboard empty"
+            flashClipboardNote("Clipboard empty")
             return
         }
         inputString(text)
         statusText = "Typed \(text.count) chars"
-        lastClipboardNote = "Typed \(min(text.count, 999)) chars"
+        flashClipboardNote("Typed \(min(text.count, 999)) chars")
     }
 
     // MARK: - Sticky modifiers (Sidecar-style)
@@ -1046,8 +1048,18 @@ final class SessionController: ObservableObject {
         guard let content = stringValue(obj["content"]), !content.isEmpty else { return }
         lastReceivedClipboard = content
         UIPasteboard.general.string = content
-        lastClipboardNote = "Copied \(min(content.count, 999)) chars from peer"
-        // Don't stomp statusText if user is mid-action; brief note is enough.
+        flashClipboardNote("Copied \(min(content.count, 999)) chars from peer")
+    }
+
+    /// Show clipboard HUD text, then clear (view animates the whole pill as one unit).
+    private func flashClipboardNote(_ text: String) {
+        clipboardNoteWork?.cancel()
+        lastClipboardNote = text
+        let work = DispatchWorkItem { [weak self] in
+            self?.lastClipboardNote = ""
+        }
+        clipboardNoteWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2, execute: work)
     }
 
     // MARK: - Clipboard auto-sync (iOS → peer)
@@ -1077,7 +1089,7 @@ final class SessionController: ObservableObject {
         if text == lastReceivedClipboard || text == lastPushedClipboard { return }
         rd_session_send_clipboard(sessionUUID, text)
         lastPushedClipboard = text
-        lastClipboardNote = "Synced \(min(text.count, 999)) chars → peer"
+        flashClipboardNote("Synced \(min(text.count, 999)) chars → peer")
     }
 
     // MARK: - Cursor events

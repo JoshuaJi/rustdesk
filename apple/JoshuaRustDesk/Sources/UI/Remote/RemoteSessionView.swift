@@ -59,12 +59,9 @@ struct RemoteSessionView: View {
 
                     VStack(spacing: 0) {
                         if isCompact {
-                            HStack(spacing: 8) {
+                            HStack(spacing: 0) {
                                 Spacer(minLength: 0)
-                                statusPill
-                                if !session.lastClipboardNote.isEmpty {
-                                    clipboardCapsule
-                                }
+                                hudPill
                             }
                             .padding(.horizontal, 10)
                             .padding(.top, 8)
@@ -126,31 +123,15 @@ struct RemoteSessionView: View {
 
     // MARK: - Top chrome (iPad: reserved strip; iPhone uses floating overlay)
 
-    private var clipboardCapsule: some View {
-        Text(session.lastClipboardNote)
-            .font(.caption2)
-            .foregroundStyle(.white.opacity(0.9))
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(.black.opacity(0.45), in: Capsule())
-            .frame(maxWidth: isCompact ? 120 : 200)
-            .transition(.opacity)
-    }
-
     private var topChromeIPad: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 0) {
             Spacer(minLength: 0)
-            statusPill
-            if !session.lastClipboardNote.isEmpty {
-                clipboardCapsule
-            }
+            hudPill
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
         .background(Color.black)
-        .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
     }
 
     private var railRevealTab: some View {
@@ -475,22 +456,35 @@ struct RemoteSessionView: View {
         .help(label)
     }
 
-    // MARK: - Status pill
+    // MARK: - Status HUD (single capsule — appears/disappears as one unit)
 
-    private var statusPill: some View {
-        Group {
+    /// One pill for mode + status + optional clipboard note (no twin capsules / trail).
+    private var hudPill: some View {
+        HStack(spacing: isCompact ? 5 : 6) {
             if isCompact {
-                compactStatusPill
+                compactStatusContent
             } else {
-                fullStatusPill
+                fullStatusContent
+            }
+            if !session.lastClipboardNote.isEmpty {
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text(session.lastClipboardNote)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
             }
         }
         .padding(.horizontal, isCompact ? 10 : 12)
         .padding(.vertical, isCompact ? 5 : 7)
         .background(.black.opacity(0.45), in: Capsule())
+        // Snap content changes; only opacity-fade the whole pill when clipboard toggles.
+        .contentTransition(.identity)
+        .animation(.easeOut(duration: 0.18), value: session.lastClipboardNote.isEmpty)
+        .drawingGroup() // composite as one layer — no leftover trail on fade/layout
     }
 
-    private var compactStatusPill: some View {
+    private var compactStatusContent: some View {
         HStack(spacing: 5) {
             Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
                 .font(.caption2)
@@ -513,7 +507,7 @@ struct RemoteSessionView: View {
         }
     }
 
-    private var fullStatusPill: some View {
+    private var fullStatusContent: some View {
         HStack(spacing: 6) {
             if session.showQualityHUD, session.phase == .connected {
                 qualityHUDPrefix
