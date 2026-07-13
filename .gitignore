@@ -17,6 +17,8 @@ cert.pfx
 *png
 *svg
 *jpg
+# Keep native iOS AppIcon assets (global *png above would drop them).
+!apple/JoshuaRustDesk/Resources/Assets.xcassets/**/*.png
 sciter.dll
 **pdb
 src/bridge_generated.rs

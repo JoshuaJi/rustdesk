@@ -21,12 +21,14 @@
 		B03F5F64CBED3A0D4627DC39 /* KeyboardLayoutFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EC96CF34EF1E48F7166D2A5 /* KeyboardLayoutFixer.swift */; };
 		B80F1433861479EBF195A495 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */; };
 		BEE6330CCA46BCC9128CFEC0 /* RemoteGestureEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02DD78ECF0BB8122CE4A498F /* RemoteGestureEngine.swift */; };
+		DDE30A73A9070B0FFE5F9D85 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 26AD6519E8136BA4929C6B2C /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		02DD78ECF0BB8122CE4A498F /* RemoteGestureEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteGestureEngine.swift; sourceTree = "<group>"; };
 		0ADB239B03307893EC752509 /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
 		118BE4B39E6656C7300D32DD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		26AD6519E8136BA4929C6B2C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		3F58372ED060879D51527201 /* RecentPeersStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPeersStore.swift; sourceTree = "<group>"; };
 		4858BCFAAD5294E78AA23407 /* RemoteAudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteAudioPlayer.swift; sourceTree = "<group>"; };
@@ -48,6 +50,7 @@
 		012F4BE4C149BC2CB60D212E /* Resources */ = {
 			isa = PBXGroup;
 			children = (
+				26AD6519E8136BA4929C6B2C /* Assets.xcassets */,
 				9E1FD6B18EBEE35EFF74229B /* Info.plist */,
 			);
 			path = Resources;
@@ -141,6 +144,7 @@
 			buildConfigurationList = 4D603B855256175F2BC006AC /* Build configuration list for PBXNativeTarget "JoshuaRustDesk" */;
 			buildPhases = (
 				A49DDF8648768A165028F23B /* Sources */,
+				5D58C595366EA1A3AAEECA88 /* Resources */,
 			);
 			buildRules = (
 			);
@@ -186,6 +190,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		5D58C595366EA1A3AAEECA88 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DDE30A73A9070B0FFE5F9D85 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A49DDF8648768A165028F23B /* Sources */ = {
@@ -261,6 +276,7 @@
 					AVFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.joshuaji.rustdesk;
+				PRODUCT_NAME = RustDesk;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "Bridging/JoshuaRustDesk-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
@@ -383,6 +399,7 @@
 					AVFoundation,
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.joshuaji.rustdesk;
+				PRODUCT_NAME = RustDesk;
 				SDKROOT = iphoneos;
 				SWIFT_OBJC_BRIDGING_HEADER = "Bridging/JoshuaRustDesk-Bridging-Header.h";
 				TARGETED_DEVICE_FAMILY = "1,2";
