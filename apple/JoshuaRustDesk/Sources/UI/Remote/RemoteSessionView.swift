@@ -24,6 +24,9 @@ struct RemoteSessionView: View {
                 MetalRemoteView(
                     session: session,
                     onSize: { size in
+                        // Soft keyboard floats over the canvas; do not renegotiate
+                        // remote viewport size when iOS temporarily shrinks bounds.
+                        guard !session.softKeyboardVisible else { return }
                         let s = UIScreen.main.scale
                         session.setViewSize(
                             width: Int(size.width * s),
@@ -31,6 +34,7 @@ struct RemoteSessionView: View {
                         )
                     }
                 )
+                .ignoresSafeArea(.keyboard)
 
                 // Lightweight HUD over canvas only (not over sidebar).
                 VStack(alignment: .trailing, spacing: 6) {
@@ -81,8 +85,11 @@ struct RemoteSessionView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(.keyboard)
         }
         .background(Color.black.ignoresSafeArea())
+        // Keyboard must float over remote desktop, not push/resize the canvas.
+        .ignoresSafeArea(.keyboard, edges: .bottom)
         .statusBarHidden(true)
         .onAppear {
             session.captureSystemShortcuts = true
