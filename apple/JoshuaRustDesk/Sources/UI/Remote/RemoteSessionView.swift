@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Sidecar-inspired remote session chrome: slim leading sidebar + status/quality HUD.
+/// Sidecar-inspired remote session: sidebar rail + canvas in HStack (no overlay).
 struct RemoteSessionView: View {
     @ObservedObject var session: SessionController
     @Binding var isPresented: Bool
@@ -8,79 +8,81 @@ struct RemoteSessionView: View {
     @State private var sidebarExpanded = true
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
 
+    private let sidebarWidth: CGFloat = 56
+
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        HStack(spacing: 0) {
+            sidecarSidebar
+                .frame(width: sidebarWidth)
+                .frame(maxHeight: .infinity)
+                .background(Color.black.opacity(0.92))
 
-            MetalRemoteView(
-                session: session,
-                onSize: { size in
-                    let s = UIScreen.main.scale
-                    session.setViewSize(
-                        width: Int(size.width * s),
-                        height: Int(size.height * s)
-                    )
-                }
-            )
-            .ignoresSafeArea()
+            // Remote canvas occupies remaining space only — never under the sidebar.
+            ZStack {
+                Color.black
 
-            // Sidecar-style leading sidebar (does not cover the canvas center).
-            HStack(spacing: 0) {
-                sidecarSidebar
-                    .padding(.leading, 8)
-                    .padding(.vertical, 12)
-                Spacer(minLength: 0).allowsHitTesting(false)
-            }
-            .allowsHitTesting(true)
+                MetalRemoteView(
+                    session: session,
+                    onSize: { size in
+                        let s = UIScreen.main.scale
+                        session.setViewSize(
+                            width: Int(size.width * s),
+                            height: Int(size.height * s)
+                        )
+                    }
+                )
 
-            // Top-trailing status + quality HUD.
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack {
+                // Lightweight HUD over canvas only (not over sidebar).
+                VStack(alignment: .trailing, spacing: 6) {
+                    HStack {
+                        Spacer()
+                        statusPill
+                            .padding(.trailing, 12)
+                            .padding(.top, 10)
+                    }
+                    if session.showQualityHUD, session.phase == .connected {
+                        HStack {
+                            Spacer()
+                            qualityPill
+                                .padding(.trailing, 12)
+                        }
+                    }
+                    if !session.lastClipboardNote.isEmpty {
+                        HStack {
+                            Spacer()
+                            Text(session.lastClipboardNote)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.9))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(.black.opacity(0.45), in: Capsule())
+                                .padding(.trailing, 12)
+                                .transition(.opacity)
+                        }
+                    }
                     Spacer()
-                    statusPill
-                        .padding(.trailing, 12)
-                        .padding(.top, 10)
                 }
-                if session.showQualityHUD, session.phase == .connected {
-                    HStack {
-                        Spacer()
-                        qualityPill
-                            .padding(.trailing, 12)
-                    }
-                }
-                if !session.lastClipboardNote.isEmpty {
-                    HStack {
-                        Spacer()
-                        Text(session.lastClipboardNote)
-                            .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.9))
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(.black.opacity(0.45), in: Capsule())
-                            .padding(.trailing, 12)
-                            .transition(.opacity)
-                    }
-                }
-                Spacer()
-            }
-            .allowsHitTesting(false)
-            .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
+                .allowsHitTesting(false)
+                .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
 
-            if case .needPassword = session.phase {
-                passwordSheet
+                if case .needPassword = session.phase {
+                    passwordSheet
+                }
+                if case .failed(let msg) = session.phase {
+                    failureOverlay(msg)
+                }
+                if session.phase == .connecting {
+                    ProgressView("Connecting…")
+                        .tint(.white)
+                        .foregroundStyle(.white)
+                        .padding(16)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                        .allowsHitTesting(false)
+                }
             }
-            if case .failed(let msg) = session.phase {
-                failureOverlay(msg)
-            }
-            if session.phase == .connecting {
-                ProgressView("Connecting…")
-                    .tint(.white)
-                    .foregroundStyle(.white)
-                    .padding(16)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                    .allowsHitTesting(false)
-            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(Color.black.ignoresSafeArea())
         .statusBarHidden(true)
         .onAppear {
             session.captureSystemShortcuts = true
@@ -90,7 +92,7 @@ struct RemoteSessionView: View {
         }
     }
 
-    // MARK: - Sidecar sidebar
+    // MARK: - Sidecar sidebar (docked rail)
 
     private var sidecarSidebar: some View {
         VStack(spacing: 6) {
@@ -102,7 +104,7 @@ struct RemoteSessionView: View {
                 isPresented = false
             }
 
-            Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
+            Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
             sidebarIconButton(
                 systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
@@ -128,8 +130,7 @@ struct RemoteSessionView: View {
                 session.pasteFromClipboard()
             }
 
-            // Sticky modifiers (Sidecar)
-            Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
+            Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
             modButton("⌃", active: session.modControl, label: "Control") {
                 session.toggleControl()
@@ -145,7 +146,7 @@ struct RemoteSessionView: View {
             }
 
             if sidebarExpanded {
-                Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
+                Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
                 sidebarIconButton(
                     systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
@@ -178,7 +179,6 @@ struct RemoteSessionView: View {
 
             Spacer(minLength: 8)
 
-            // Connection path indicator
             Circle()
                 .fill(connectionDotColor)
                 .frame(width: 8, height: 8)
@@ -186,7 +186,7 @@ struct RemoteSessionView: View {
                 .accessibilityLabel(session.connectionSummary)
 
             sidebarIconButton(
-                systemName: sidebarExpanded ? "chevron.left" : "chevron.right",
+                systemName: sidebarExpanded ? "chevron.up" : "chevron.down",
                 label: sidebarExpanded ? "Collapse" : "Expand"
             ) {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -194,17 +194,13 @@ struct RemoteSessionView: View {
                 }
             }
         }
-        .padding(.vertical, 10)
+        .padding(.vertical, 12)
         .padding(.horizontal, 6)
-        .frame(width: 52)
-        .background {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Color.white.opacity(0.08))
+                .frame(width: 1)
         }
     }
 
