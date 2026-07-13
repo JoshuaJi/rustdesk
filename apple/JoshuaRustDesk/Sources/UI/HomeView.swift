@@ -23,17 +23,24 @@ struct HomeView: View {
         !trimmedPeerId.isEmpty
     }
 
-    /// Keynote-like adaptive tile width.
+    @Environment(\.horizontalSizeClass) private var hSize
+
+    /// Keynote-like adaptive tile width (tighter on iPhone).
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 160, maximum: 220), spacing: 20, alignment: .top)]
+        let minW: CGFloat = hSize == .compact ? 140 : 160
+        let maxW: CGFloat = hSize == .compact ? 200 : 220
+        let spacing: CGFloat = hSize == .compact ? 14 : 20
+        return [GridItem(.adaptive(minimum: minW, maximum: maxW), spacing: spacing, alignment: .top)]
     }
+
+    private var gridSpacing: CGFloat { hSize == .compact ? 18 : 28 }
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: hSize == .compact ? 14 : 20) {
                 deviceHeader
 
-                LazyVGrid(columns: columns, spacing: 28) {
+                LazyVGrid(columns: columns, spacing: gridSpacing) {
                     // “+” always first — Keynote create tile
                     NewDocumentTile {
                         peerId = ""
@@ -58,7 +65,7 @@ struct HomeView: View {
                         }
                     }
                 }
-                .padding(.horizontal, 20)
+                .padding(.horizontal, hSize == .compact ? 16 : 20)
                 .padding(.bottom, 32)
 
                 if let connectError, !showRemote {
@@ -122,7 +129,7 @@ struct HomeView: View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Connections")
-                    .font(.largeTitle.weight(.bold))
+                    .font(hSize == .compact ? .title.weight(.bold) : .largeTitle.weight(.bold))
                 HStack(spacing: 8) {
                     Text("This device")
                         .font(.subheadline)
@@ -130,12 +137,15 @@ struct HomeView: View {
                     Text(bridge.localId.isEmpty ? "—" : bridge.localId)
                         .font(.subheadline.monospacedDigit().weight(.medium))
                         .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
                     if !bridge.localId.isEmpty, bridge.localId != "—" {
                         Button {
                             UIPasteboard.general.string = bridge.localId
                         } label: {
                             Image(systemName: "doc.on.doc")
-                                .font(.caption)
+                                .font(.body)
+                                .frame(minWidth: 44, minHeight: 32)
                         }
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Copy device ID")
@@ -156,10 +166,11 @@ struct HomeView: View {
                     Image(systemName: "ellipsis.circle")
                         .font(.title3)
                         .foregroundStyle(.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
                 }
             }
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, hSize == .compact ? 16 : 20)
         .padding(.top, 4)
     }
 
@@ -407,6 +418,8 @@ private struct NewConnectionSheet: View {
     var onConnect: () -> Void
     var onCancel: () -> Void
 
+    @FocusState private var peerFieldFocused: Bool
+
     var body: some View {
         NavigationStack {
             Form {
@@ -416,6 +429,7 @@ private struct NewConnectionSheet: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                             .keyboardType(.numberPad)
+                            .focused($peerFieldFocused)
                             .onChange(of: peerId) { newValue in
                                 let filtered = newValue.filter(\.isNumber)
                                 if filtered != newValue { peerId = filtered }
@@ -426,6 +440,7 @@ private struct NewConnectionSheet: View {
                             }
                         } label: {
                             Image(systemName: "doc.on.clipboard")
+                                .frame(minWidth: 44, minHeight: 44)
                         }
                         .buttonStyle(.borderless)
                         .accessibilityLabel("Paste peer ID")
@@ -445,6 +460,7 @@ private struct NewConnectionSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
+                        peerFieldFocused = false
                         onConnect()
                     } label: {
                         if isConnecting {
@@ -455,6 +471,12 @@ private struct NewConnectionSheet: View {
                         }
                     }
                     .disabled(!canConnect || isConnecting)
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("Done") {
+                        peerFieldFocused = false
+                    }
                 }
             }
         }

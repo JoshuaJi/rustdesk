@@ -21,17 +21,21 @@ struct JoshuaRustDeskApp: App {
 
 struct ContentView: View {
     @EnvironmentObject var bridge: RustDeskBridge
+    @Environment(\.horizontalSizeClass) private var hSize
     @State private var showSettings = false
 
     var body: some View {
         NavigationStack {
             HomeView()
-                // Document-picker home: title lives in the grid header, not the nav bar.
+                // Document-picker home: title lives in the grid header on iPad;
+                // on iPhone the in-body “Connections” title is enough.
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
-                    ToolbarItem(placement: .principal) {
-                        Text("RustDesk")
-                            .font(.headline)
+                    if hSize != .compact {
+                        ToolbarItem(placement: .principal) {
+                            Text("RustDesk")
+                                .font(.headline)
+                        }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
@@ -39,6 +43,7 @@ struct ContentView: View {
                         } label: {
                             Image(systemName: "gearshape")
                         }
+                        .accessibilityLabel("Settings")
                     }
                 }
                 .sheet(isPresented: $showSettings) {

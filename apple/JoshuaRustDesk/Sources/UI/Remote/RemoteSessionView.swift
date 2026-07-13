@@ -1,119 +1,177 @@
 import SwiftUI
 
-/// Sidecar-inspired remote session: sidebar rail + canvas in HStack (no overlay).
+/// Sidecar-inspired remote session: docked rail + canvas.
+/// Adapts for iPhone (compact): scrollable rail, compact HUD, safe-area padding.
 struct RemoteSessionView: View {
     @ObservedObject var session: SessionController
     @Binding var isPresented: Bool
+    @Environment(\.horizontalSizeClass) private var hSize
+    @Environment(\.verticalSizeClass) private var vSize
     @State private var password = ""
+    /// Advanced tools visible in the rail (quality/codec/HUD…).
     @State private var sidebarExpanded = true
+    /// Fully hide the rail on compact (edge tab restores it).
+    @State private var railHidden = false
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
 
-    private let sidebarWidth: CGFloat = 56
+    private var isCompact: Bool { hSize == .compact }
+    /// Phone landscape: short height — keep advanced tools collapsed.
+    private var isShortHeight: Bool { vSize == .compact }
+
+    private var sidebarWidth: CGFloat {
+        if railHidden { return 0 }
+        return isCompact ? 52 : 56
+    }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidecarSidebar
-                .frame(width: sidebarWidth)
-                .frame(maxHeight: .infinity)
-                .background(Color.black.opacity(0.92))
+        GeometryReader { geo in
+            let leadingSafe = geo.safeAreaInsets.leading
+            let trailingSafe = geo.safeAreaInsets.trailing
+            let bottomSafe = geo.safeAreaInsets.bottom
+            let topSafe = geo.safeAreaInsets.top
 
-            // HUD above desktop (not overlaid on the remote picture).
-            ZStack {
-                VStack(spacing: 0) {
-                    HStack(spacing: 8) {
-                        Spacer(minLength: 0)
-                        statusPill
-                        if !session.lastClipboardNote.isEmpty {
-                            Text(session.lastClipboardNote)
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.9))
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(.black.opacity(0.45), in: Capsule())
-                                .transition(.opacity)
-                        }
+            HStack(spacing: 0) {
+                if !railHidden {
+                    sidecarSidebar(bottomInset: max(bottomSafe, 8), topInset: max(topSafe, 4))
+                        .frame(width: sidebarWidth + (isCompact ? leadingSafe : 0))
+                        .padding(.leading, isCompact ? leadingSafe : 0)
+                        .frame(maxHeight: .infinity)
+                        .background(Color.black.opacity(0.92))
+                }
+
+                // HUD above desktop (not overlaid on the remote picture).
+                ZStack {
+                    VStack(spacing: 0) {
+                        topChrome
+                            .padding(.top, railHidden ? max(topSafe, 4) : 0)
+
+                        MetalRemoteView(
+                            session: session,
+                            onSize: { size in
+                                guard !session.softKeyboardVisible else { return }
+                                let s = UIScreen.main.scale
+                                session.setViewSize(
+                                    width: Int(size.width * s),
+                                    height: Int(size.height * s)
+                                )
+                            }
+                        )
+                        .padding(.horizontal, isCompact ? 6 : 10)
+                        .padding(.bottom, max(isCompact ? 6 : 10, bottomSafe > 0 ? 4 : 0))
+                        .padding(.trailing, railHidden && isCompact ? max(trailingSafe, 0) : 0)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .ignoresSafeArea(.keyboard)
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.black)
-                    .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
-
-                    MetalRemoteView(
-                        session: session,
-                        onSize: { size in
-                            // Soft keyboard floats over the canvas; do not renegotiate
-                            // remote viewport size when iOS temporarily shrinks bounds.
-                            guard !session.softKeyboardVisible else { return }
-                            let s = UIScreen.main.scale
-                            session.setViewSize(
-                                width: Int(size.width * s),
-                                height: Int(size.height * s)
-                            )
-                        }
-                    )
-                    // Corners via MTKView.layer (CAMetalLayer ignores SwiftUI clipShape alone).
-                    .padding(.horizontal, 10)
-                    .padding(.bottom, 10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(.keyboard)
+                    .background(Color.black)
+
+                    if railHidden {
+                        railRevealTab
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    }
+
+                    if case .needPassword = session.phase {
+                        passwordSheet
+                    }
+                    if case .failed(let msg) = session.phase {
+                        failureOverlay(msg)
+                    }
+                    if session.phase == .connecting {
+                        connectingOverlay
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
-
-                if case .needPassword = session.phase {
-                    passwordSheet
-                }
-                if case .failed(let msg) = session.phase {
-                    failureOverlay(msg)
-                }
-                if session.phase == .connecting {
-                    VStack(spacing: 10) {
-                        ProgressView()
-                            .tint(.white)
-                        Text(session.connectionStage.isEmpty ? "Connecting…" : session.connectionStage)
-                            .font(.subheadline.weight(.medium))
-                            .foregroundStyle(.white)
-                            .multilineTextAlignment(.center)
-                        if !session.peerId.isEmpty {
-                            Text(session.peerId)
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.65))
-                        }
-                        Button("Cancel") {
-                            session.close()
-                            isPresented = false
-                        }
-                        .buttonStyle(.bordered)
-                        .tint(.white)
-                        .padding(.top, 4)
-                    }
-                    .padding(20)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                }
+                .ignoresSafeArea(.keyboard)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .ignoresSafeArea(.keyboard)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
-        // SwiftUI-level ignore (not sufficient alone for fullScreenCover).
         .ignoresSafeArea(.keyboard, edges: .all)
-        // UIKit-level: strip hosting-controller keyboard safe area + re-pin frame.
         .disableKeyboardLayoutShift()
-        .statusBarHidden(true)
+        .statusBarHidden(!isCompact) // keep status bar on phone for clock/signal
         .onAppear {
             session.captureSystemShortcuts = true
+            // Phone: start with advanced tools collapsed; keep primary rail.
+            if isCompact || isShortHeight {
+                sidebarExpanded = false
+            }
+        }
+        .onChange(of: session.softKeyboardVisible) { visible in
+            if visible, isCompact {
+                sidebarExpanded = false
+            }
+        }
+        .onChange(of: hSize) { _ in
+            if isCompact || isShortHeight {
+                sidebarExpanded = false
+            }
         }
         .onDisappear {
             session.softKeyboardVisible = false
         }
     }
 
-    // MARK: - Sidecar sidebar (docked rail)
+    // MARK: - Top chrome
 
-    private var sidecarSidebar: some View {
-        VStack(spacing: 6) {
+    private var topChrome: some View {
+        HStack(spacing: 8) {
+            if railHidden {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { railHidden = false }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .frame(width: 36, height: 36)
+                        .background(Circle().fill(Color.white.opacity(0.1)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Show toolbar")
+            }
+            Spacer(minLength: 0)
+            statusPill
+            if !session.lastClipboardNote.isEmpty {
+                Text(session.lastClipboardNote)
+                    .font(.caption2)
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.45), in: Capsule())
+                    .frame(maxWidth: isCompact ? 120 : 200)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, isCompact ? 8 : 12)
+        .padding(.vertical, isCompact ? 5 : 8)
+        .frame(maxWidth: .infinity)
+        .background(Color.black)
+        .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
+    }
+
+    private var railRevealTab: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.18)) { railHidden = false }
+        } label: {
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white.opacity(0.85))
+                .frame(width: 22, height: 56)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.white.opacity(0.14))
+                )
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 2)
+        .accessibilityLabel("Show toolbar")
+    }
+
+    // MARK: - Sidecar sidebar
+
+    private func sidecarSidebar(bottomInset: CGFloat, topInset: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            // Sticky disconnect
             sidebarIconButton(
                 systemName: "xmark",
                 label: "Disconnect"
@@ -121,128 +179,154 @@ struct RemoteSessionView: View {
                 session.close()
                 isPresented = false
             }
+            .padding(.top, max(topInset, 8))
+            .padding(.bottom, 4)
 
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+                .padding(.bottom, 4)
 
-            sidebarIconButton(
-                systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
-                label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
-                emphasized: true
-            ) {
-                session.toggleRemoteCursor()
-            }
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: isCompact ? 5 : 6) {
+                    sidebarIconButton(
+                        systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
+                        label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
+                        emphasized: true
+                    ) {
+                        session.toggleRemoteCursor()
+                    }
 
-            sidebarIconButton(
-                systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
-                label: "Keyboard"
-            ) {
-                let next = !session.softKeyboardVisible
-                if next { session.captureSystemShortcuts = false }
-                session.softKeyboardVisible = next
-            }
+                    sidebarIconButton(
+                        systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
+                        label: "Keyboard"
+                    ) {
+                        let next = !session.softKeyboardVisible
+                        if next { session.captureSystemShortcuts = false }
+                        session.softKeyboardVisible = next
+                    }
 
-            // Tap → true clipboard push; long-press → type as keystrokes.
-            Button {
-                session.pasteFromClipboard()
-            } label: {
-                Image(systemName: "doc.on.clipboard")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Color.white.opacity(0.92))
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
-            }
-            .buttonStyle(.plain)
-            .simultaneousGesture(
-                LongPressGesture(minimumDuration: 0.45).onEnded { _ in
-                    session.typeClipboardAsKeystrokes()
+                    // Tap → clipboard push; long-press → type as keystrokes.
+                    Button {
+                        session.pasteFromClipboard()
+                    } label: {
+                        Image(systemName: "doc.on.clipboard")
+                            .font(.system(size: isCompact ? 16 : 17, weight: .semibold))
+                            .foregroundStyle(Color.white.opacity(0.92))
+                            .frame(width: hit, height: hit)
+                            .background(Circle().fill(Color.white.opacity(0.08)))
+                    }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+                            session.typeClipboardAsKeystrokes()
+                        }
+                    )
+                    .accessibilityLabel("Paste clipboard to peer")
+                    .help("Tap: push clipboard · Long-press: type keystrokes")
+
+                    if session.hasMultipleDisplays {
+                        sidebarIconButton(
+                            systemName: "rectangle.on.rectangle",
+                            label: "Display \(session.displaySummary)",
+                            emphasized: true
+                        ) {
+                            session.cycleDisplay()
+                        }
+                    }
+
+                    Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+
+                    // Modifier keys — 2×2 on compact to save height.
+                    if isCompact {
+                        VStack(spacing: 5) {
+                            HStack(spacing: 4) {
+                                modButton("⌃", active: session.modControl, label: "Control") {
+                                    session.toggleControl()
+                                }
+                                modButton("⌥", active: session.modOption, label: "Option") {
+                                    session.toggleOption()
+                                }
+                            }
+                            HStack(spacing: 4) {
+                                modButton("⇧", active: session.modShift, label: "Shift") {
+                                    session.toggleShift()
+                                }
+                                modButton("⌘", active: session.modCommand, label: "Command") {
+                                    session.toggleCommand()
+                                }
+                            }
+                        }
+                    } else {
+                        modButton("⌃", active: session.modControl, label: "Control") {
+                            session.toggleControl()
+                        }
+                        modButton("⌥", active: session.modOption, label: "Option") {
+                            session.toggleOption()
+                        }
+                        modButton("⇧", active: session.modShift, label: "Shift") {
+                            session.toggleShift()
+                        }
+                        modButton("⌘", active: session.modCommand, label: "Command") {
+                            session.toggleCommand()
+                        }
+                    }
+
+                    if isCompact {
+                        // Overflow menu instead of a long expanded list.
+                        Menu {
+                            advancedMenuItems
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 16, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.92))
+                                .frame(width: hit, height: hit)
+                                .background(Circle().fill(Color.white.opacity(0.08)))
+                        }
+                        .accessibilityLabel("More tools")
+                    } else if sidebarExpanded {
+                        Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+                        advancedToolButtons
+                    }
+
+                    // Spacer inside scroll so footer still reachable after short content
+                    Color.clear.frame(height: 8)
                 }
-            )
-            .accessibilityLabel("Paste clipboard to peer")
-            .help("Tap: push clipboard · Long-press: type keystrokes")
-
-            if session.hasMultipleDisplays {
-                sidebarIconButton(
-                    systemName: "rectangle.on.rectangle",
-                    label: "Display \(session.displaySummary)",
-                    emphasized: true
-                ) {
-                    session.cycleDisplay()
-                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
             }
 
-            Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+            // Sticky footer: status + collapse / hide rail
+            VStack(spacing: 6) {
+                Circle()
+                    .fill(connectionDotColor)
+                    .frame(width: 8, height: 8)
+                    .accessibilityLabel(session.connectionSummary)
 
-            modButton("⌃", active: session.modControl, label: "Control") {
-                session.toggleControl()
-            }
-            modButton("⌥", active: session.modOption, label: "Option") {
-                session.toggleOption()
-            }
-            modButton("⇧", active: session.modShift, label: "Shift") {
-                session.toggleShift()
-            }
-            modButton("⌘", active: session.modCommand, label: "Command") {
-                session.toggleCommand()
-            }
-
-            if sidebarExpanded {
-                Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
-
-                sidebarIconButton(
-                    systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
-                    label: "Shortcuts"
-                ) {
-                    session.captureSystemShortcuts.toggle()
+                if !isCompact {
+                    sidebarIconButton(
+                        systemName: sidebarExpanded ? "chevron.up" : "chevron.down",
+                        label: sidebarExpanded ? "Collapse" : "Expand"
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            sidebarExpanded.toggle()
+                        }
+                    }
                 }
 
-                sidebarIconButton(
-                    systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
-                    label: session.viewOnly ? "View only" : "Control"
-                ) {
-                    session.toggleViewOnly()
-                }
-
-                sidebarIconButton(
-                    systemName: "sparkles.tv",
-                    label: session.qualityLabel
-                ) {
-                    session.cycleQuality()
-                }
-
-                sidebarIconButton(
-                    systemName: session.isHardDecodeCodec ? "cpu.fill" : "cpu",
-                    label: "Codec \(session.codecPreference)"
-                ) {
-                    session.cycleCodecPreference()
-                }
-
-                sidebarIconButton(
-                    systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
-                    label: "Quality HUD"
-                ) {
-                    session.showQualityHUD.toggle()
+                if isCompact {
+                    sidebarIconButton(
+                        systemName: "sidebar.leading",
+                        label: "Hide toolbar"
+                    ) {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            railHidden = true
+                        }
+                    }
                 }
             }
-
-            Spacer(minLength: 8)
-
-            Circle()
-                .fill(connectionDotColor)
-                .frame(width: 8, height: 8)
-                .padding(.bottom, 2)
-                .accessibilityLabel(session.connectionSummary)
-
-            sidebarIconButton(
-                systemName: sidebarExpanded ? "chevron.up" : "chevron.down",
-                label: sidebarExpanded ? "Collapse" : "Expand"
-            ) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    sidebarExpanded.toggle()
-                }
-            }
+            .padding(.bottom, bottomInset)
+            .padding(.top, 4)
         }
-        .padding(.vertical, 12)
-        .padding(.horizontal, 6)
+        .padding(.horizontal, isCompact ? 4 : 6)
         .frame(maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .trailing) {
             Rectangle()
@@ -251,18 +335,101 @@ struct RemoteSessionView: View {
         }
     }
 
+    @ViewBuilder
+    private var advancedToolButtons: some View {
+        sidebarIconButton(
+            systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
+            label: "Shortcuts"
+        ) {
+            session.captureSystemShortcuts.toggle()
+        }
+        sidebarIconButton(
+            systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
+            label: session.viewOnly ? "View only" : "Control"
+        ) {
+            session.toggleViewOnly()
+        }
+        sidebarIconButton(
+            systemName: "sparkles.tv",
+            label: session.qualityLabel
+        ) {
+            session.cycleQuality()
+        }
+        sidebarIconButton(
+            systemName: session.isHardDecodeCodec ? "cpu.fill" : "cpu",
+            label: "Codec \(session.codecPreference)"
+        ) {
+            session.cycleCodecPreference()
+        }
+        sidebarIconButton(
+            systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
+            label: "Quality HUD"
+        ) {
+            session.showQualityHUD.toggle()
+        }
+    }
+
+    @ViewBuilder
+    private var advancedMenuItems: some View {
+        Button {
+            session.captureSystemShortcuts.toggle()
+        } label: {
+            Label(
+                session.captureSystemShortcuts ? "Shortcuts on" : "Shortcuts off",
+                systemImage: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle"
+            )
+        }
+        Button {
+            session.toggleViewOnly()
+        } label: {
+            Label(
+                session.viewOnly ? "View only" : "Control mode",
+                systemImage: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill"
+            )
+        }
+        Button {
+            session.cycleQuality()
+        } label: {
+            Label("Quality: \(session.qualityLabel)", systemImage: "sparkles.tv")
+        }
+        Button {
+            session.cycleCodecPreference()
+        } label: {
+            Label("Codec: \(session.codecPreference)", systemImage: "cpu")
+        }
+        Button {
+            session.showQualityHUD.toggle()
+        } label: {
+            Label(
+                session.showQualityHUD ? "Hide quality HUD" : "Show quality HUD",
+                systemImage: "chart.bar"
+            )
+        }
+        if session.hasMultipleDisplays {
+            Button {
+                session.cycleDisplay()
+            } label: {
+                Label("Display \(session.displaySummary)", systemImage: "rectangle.on.rectangle")
+            }
+        }
+    }
+
+    private var hit: CGFloat { isCompact ? 44 : 40 }
+
     private var connectionDotColor: Color {
         if session.phase != .connected { return .orange.opacity(0.9) }
         if session.connectionDirect { return .green.opacity(0.95) }
-        return .green.opacity(0.55) // relay still green, slightly dimmer
+        return .green.opacity(0.55)
     }
 
     private func modButton(_ title: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        let w: CGFloat = isCompact ? 22 : 40
+        let h: CGFloat = isCompact ? 32 : 40
+        return Button(action: action) {
             Text(title)
-                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .font(.system(size: isCompact ? 12 : 15, weight: .bold, design: .rounded))
                 .foregroundStyle(active ? Color.black : Color.white.opacity(0.92))
-                .frame(width: 40, height: 36)
+                .frame(width: w, height: h)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(active ? Color.white : Color.white.opacity(0.08))
@@ -282,9 +449,9 @@ struct RemoteSessionView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 17, weight: .semibold))
+                .font(.system(size: isCompact ? 16 : 17, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(emphasized ? 1.0 : 0.92))
-                .frame(width: 40, height: 40)
+                .frame(width: hit, height: hit)
                 .background(
                     Circle()
                         .fill(Color.white.opacity(emphasized ? 0.16 : 0.08))
@@ -295,9 +462,46 @@ struct RemoteSessionView: View {
         .help(label)
     }
 
+    // MARK: - Status pill
+
     private var statusPill: some View {
+        Group {
+            if isCompact {
+                compactStatusPill
+            } else {
+                fullStatusPill
+            }
+        }
+        .padding(.horizontal, isCompact ? 10 : 12)
+        .padding(.vertical, isCompact ? 5 : 7)
+        .background(.black.opacity(0.45), in: Capsule())
+    }
+
+    private var compactStatusPill: some View {
+        HStack(spacing: 5) {
+            Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
+                .font(.caption2)
+                .foregroundStyle(.white.opacity(session.connectionDirect ? 0.95 : 0.55))
+            Text(session.showRemoteCursor ? "Cursor" : "Touch")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.75))
+            if !session.modifiersSummary.isEmpty {
+                Text(session.modifiersSummary)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+            }
+            Text("·")
+                .foregroundStyle(.white.opacity(0.35))
+            Text(session.statusText)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+    }
+
+    private var fullStatusPill: some View {
         HStack(spacing: 6) {
-            // Quality HUD sits to the left of Touch/Cursor.
             if session.showQualityHUD, session.phase == .connected {
                 qualityHUDPrefix
                 Text("·")
@@ -330,9 +534,6 @@ struct RemoteSessionView: View {
                     .foregroundStyle(.white.opacity(0.75))
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.black.opacity(0.45), in: Capsule())
     }
 
     @ViewBuilder
@@ -365,6 +566,32 @@ struct RemoteSessionView: View {
 
     // MARK: - Overlays
 
+    private var connectingOverlay: some View {
+        VStack(spacing: 10) {
+            ProgressView()
+                .tint(.white)
+            Text(session.connectionStage.isEmpty ? "Connecting…" : session.connectionStage)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+            if !session.peerId.isEmpty {
+                Text(session.peerId)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.65))
+            }
+            Button("Cancel") {
+                session.close()
+                isPresented = false
+            }
+            .buttonStyle(.bordered)
+            .tint(.white)
+            .padding(.top, 4)
+        }
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 24)
+    }
+
     private var passwordSheet: some View {
         VStack(spacing: 12) {
             Text(session.passwordPrompt.isEmpty ? "Password required" : session.passwordPrompt)
@@ -394,7 +621,9 @@ struct RemoteSessionView: View {
             }
         }
         .padding(20)
+        .frame(maxWidth: 340)
         .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 16)
     }
 
     private func failureOverlay(_ msg: String) -> some View {

@@ -37,7 +37,7 @@ struct SettingsView: View {
                     Text("VP9").tag("vp9")
                     Text("AV1").tag("av1")
                 }
-                Text("H.264/H.265 use iPad VideoToolbox hard-decode. Soft codecs (VP8/AV1) use more CPU.")
+                Text("H.264/H.265 use on-device VideoToolbox hard-decode. Soft codecs (VP8/AV1) use more CPU.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
