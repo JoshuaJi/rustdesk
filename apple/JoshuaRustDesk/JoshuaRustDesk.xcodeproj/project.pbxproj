@@ -1,0 +1,452 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		29C009E2FE8311D79C5A752D /* RemoteSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F40A717989DC460F5381E73 /* RemoteSessionView.swift */; };
+		36F3B176AA9DF500C7CE2323 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */; };
+		47026AEDDB1362C950C31B4C /* MetalRemoteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E25021681FF17E8217B4FE70 /* MetalRemoteView.swift */; };
+		5040C25EA9789C4CA17E089B /* RustDeskBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */; };
+		5B451D1FB07E4C1603BBF27B /* JoshuaRustDeskApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE93E3AF59BB701EE565D34 /* JoshuaRustDeskApp.swift */; };
+		625245FD03F3604036D3221F /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ADB239B03307893EC752509 /* SessionController.swift */; };
+		98FA0D7DA2DC82B03BF1C7D5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118BE4B39E6656C7300D32DD /* SettingsView.swift */; };
+		B80F1433861479EBF195A495 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		0ADB239B03307893EC752509 /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
+		118BE4B39E6656C7300D32DD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		4902E9B60A5D529574454FBE /* JoshuaRustDesk.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = JoshuaRustDesk.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		4F40A717989DC460F5381E73 /* RemoteSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionView.swift; sourceTree = "<group>"; };
+		5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustDeskBridge.swift; sourceTree = "<group>"; };
+		6165DEAE3CE6507CF915AE77 /* rustdesk_ios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rustdesk_ios.h; sourceTree = "<group>"; };
+		7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
+		9E1FD6B18EBEE35EFF74229B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		C119B4AD7A449750DD761B39 /* JoshuaRustDesk-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "JoshuaRustDesk-Bridging-Header.h"; sourceTree = "<group>"; };
+		E25021681FF17E8217B4FE70 /* MetalRemoteView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MetalRemoteView.swift; sourceTree = "<group>"; };
+		FCE93E3AF59BB701EE565D34 /* JoshuaRustDeskApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JoshuaRustDeskApp.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		012F4BE4C149BC2CB60D212E /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				9E1FD6B18EBEE35EFF74229B /* Info.plist */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		0F37D6E821ACAD927E15BE93 /* Bridging */ = {
+			isa = PBXGroup;
+			children = (
+				C119B4AD7A449750DD761B39 /* JoshuaRustDesk-Bridging-Header.h */,
+				6165DEAE3CE6507CF915AE77 /* rustdesk_ios.h */,
+			);
+			path = Bridging;
+			sourceTree = "<group>";
+		};
+		28AB66D8B2E311225893FF31 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				4902E9B60A5D529574454FBE /* JoshuaRustDesk.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		97044DE59E30BD3F6614D71B /* Core */ = {
+			isa = PBXGroup;
+			children = (
+				5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */,
+				0ADB239B03307893EC752509 /* SessionController.swift */,
+			);
+			path = Core;
+			sourceTree = "<group>";
+		};
+		A0D9601CB6A2B1D48CB1B338 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */,
+				FCE93E3AF59BB701EE565D34 /* JoshuaRustDeskApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		AFC5BE0221860F4C3F7A71B8 /* UI */ = {
+			isa = PBXGroup;
+			children = (
+				7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */,
+				118BE4B39E6656C7300D32DD /* SettingsView.swift */,
+				E1FF575B1A9E326C44C9553E /* Remote */,
+			);
+			path = UI;
+			sourceTree = "<group>";
+		};
+		D42A7004982D84C10FFA1B3A = {
+			isa = PBXGroup;
+			children = (
+				0F37D6E821ACAD927E15BE93 /* Bridging */,
+				012F4BE4C149BC2CB60D212E /* Resources */,
+				F566055342ADFC34105A595E /* Sources */,
+				28AB66D8B2E311225893FF31 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		E1FF575B1A9E326C44C9553E /* Remote */ = {
+			isa = PBXGroup;
+			children = (
+				E25021681FF17E8217B4FE70 /* MetalRemoteView.swift */,
+				4F40A717989DC460F5381E73 /* RemoteSessionView.swift */,
+			);
+			path = Remote;
+			sourceTree = "<group>";
+		};
+		F566055342ADFC34105A595E /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A0D9601CB6A2B1D48CB1B338 /* App */,
+				97044DE59E30BD3F6614D71B /* Core */,
+				AFC5BE0221860F4C3F7A71B8 /* UI */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		5239CC987B17F512C975CC83 /* JoshuaRustDesk */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4D603B855256175F2BC006AC /* Build configuration list for PBXNativeTarget "JoshuaRustDesk" */;
+			buildPhases = (
+				A49DDF8648768A165028F23B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = JoshuaRustDesk;
+			packageProductDependencies = (
+			);
+			productName = JoshuaRustDesk;
+			productReference = 4902E9B60A5D529574454FBE /* JoshuaRustDesk.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		EF58FE9120E1CD086B81245A /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					5239CC987B17F512C975CC83 = {
+						DevelopmentTeam = GGUE5367V3;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 9DB4081EC0631FB368802592 /* Build configuration list for PBXProject "JoshuaRustDesk" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = D42A7004982D84C10FFA1B3A;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 28AB66D8B2E311225893FF31 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				5239CC987B17F512C975CC83 /* JoshuaRustDesk */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A49DDF8648768A165028F23B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				36F3B176AA9DF500C7CE2323 /* AppDelegate.swift in Sources */,
+				B80F1433861479EBF195A495 /* HomeView.swift in Sources */,
+				5B451D1FB07E4C1603BBF27B /* JoshuaRustDeskApp.swift in Sources */,
+				47026AEDDB1362C950C31B4C /* MetalRemoteView.swift in Sources */,
+				29C009E2FE8311D79C5A752D /* RemoteSessionView.swift in Sources */,
+				5040C25EA9789C4CA17E089B /* RustDeskBridge.swift in Sources */,
+				625245FD03F3604036D3221F /* SessionController.swift in Sources */,
+				98FA0D7DA2DC82B03BF1C7D5 /* SettingsView.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		17C2960468A46FFC6A15C6B2 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Bridging",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/../../target/aarch64-apple-ios/release",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-force_load",
+					"$(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
+					"-lc++",
+					"-lsqlite3",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					Metal,
+					"-framework",
+					MetalKit,
+					"-framework",
+					CoreVideo,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					GameController,
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					AVFoundation,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.joshuaji.rustdesk;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Bridging/JoshuaRustDesk-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		247225F8FF34BDFC0948FCD8 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = GGUE5367V3;
+				ENABLE_BITCODE = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AE06439F07AABF312718C0F5 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				HEADER_SEARCH_PATHS = (
+					"$(SRCROOT)/Bridging",
+				);
+				INFOPLIST_FILE = Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(SRCROOT)/../../target/aarch64-apple-ios/release",
+				);
+				ONLY_ACTIVE_ARCH = YES;
+				OTHER_LDFLAGS = (
+					"-force_load",
+					"$(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
+					"-lc++",
+					"-lsqlite3",
+					"-framework",
+					VideoToolbox,
+					"-framework",
+					Metal,
+					"-framework",
+					MetalKit,
+					"-framework",
+					CoreVideo,
+					"-framework",
+					CoreMedia,
+					"-framework",
+					CoreGraphics,
+					"-framework",
+					GameController,
+					"-framework",
+					Network,
+					"-framework",
+					Security,
+					"-framework",
+					SystemConfiguration,
+					"-framework",
+					AudioToolbox,
+					"-framework",
+					AVFoundation,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.joshuaji.rustdesk;
+				SDKROOT = iphoneos;
+				SWIFT_OBJC_BRIDGING_HEADER = "Bridging/JoshuaRustDesk-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		DA653D988E0EF142E648F29E /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = GGUE5367V3;
+				ENABLE_BITCODE = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4D603B855256175F2BC006AC /* Build configuration list for PBXNativeTarget "JoshuaRustDesk" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				17C2960468A46FFC6A15C6B2 /* Debug */,
+				AE06439F07AABF312718C0F5 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		9DB4081EC0631FB368802592 /* Build configuration list for PBXProject "JoshuaRustDesk" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				247225F8FF34BDFC0948FCD8 /* Debug */,
+				DA653D988E0EF142E648F29E /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = EF58FE9120E1CD086B81245A /* Project object */;
+}

@@ -1,0 +1,65 @@
+name: JoshuaRustDesk
+options:
+  bundleIdPrefix: com.joshuaji
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    DEVELOPMENT_TEAM: GGUE5367V3
+    CODE_SIGN_STYLE: Automatic
+    CLANG_ENABLE_MODULES: YES
+    ENABLE_BITCODE: NO
+targets:
+  JoshuaRustDesk:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Bridging
+        buildPhase: headers
+      - path: Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.joshuaji.rustdesk
+        INFOPLIST_FILE: Resources/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Bridging/JoshuaRustDesk-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/Bridging
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../../target/aarch64-apple-ios/release
+        OTHER_LDFLAGS:
+          - -force_load
+          - $(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a
+          - -lc++
+          - -lsqlite3
+          - -framework
+          - VideoToolbox
+          - -framework
+          - Metal
+          - -framework
+          - MetalKit
+          - -framework
+          - CoreVideo
+          - -framework
+          - CoreMedia
+          - -framework
+          - CoreGraphics
+          - -framework
+          - GameController
+          - -framework
+          - Network
+          - -framework
+          - Security
+          - -framework
+          - SystemConfiguration
+          - -framework
+          - AudioToolbox
+          - -framework
+          - AVFoundation
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        ONLY_ACTIVE_ARCH: YES
+    scheme:
+      gatherCoverageData: false

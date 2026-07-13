@@ -197,9 +197,53 @@ pub unsafe extern "C" fn get_rustdesk_app_name(buffer: *mut u16, length: i32) ->
     -1
 }
 
+/// UI event delivery: Flutter FRB stream and/or native iOS C callback.
+#[derive(Clone)]
+pub enum EventSink {
+    Flutter(StreamSink<EventToUI>),
+    /// kind: 0=JSON event, 1=rgba ready (display), 2=close
+    Native {
+        cb: extern "C" fn(*mut c_void, c_int, *const c_char, usize),
+        user: *mut c_void,
+    },
+}
+
+// *mut c_void is not Send/Sync by default; we only ever invoke from Rust threads
+// that already push UI events (same as StreamSink). Mark intentionally.
+unsafe impl Send for EventSink {}
+unsafe impl Sync for EventSink {}
+
+impl EventSink {
+    pub fn send(&self, event: EventToUI) {
+        match self {
+            EventSink::Flutter(stream) => {
+                let _ = stream.add(event);
+            }
+            EventSink::Native { cb, user } => match event {
+                EventToUI::Event(s) => {
+                    if s == "close" {
+                        cb(*user, 2, std::ptr::null(), 0);
+                    } else {
+                        if let Ok(c) = CString::new(s) {
+                            cb(*user, 0, c.as_ptr(), 0);
+                        }
+                    }
+                }
+                EventToUI::Rgba(display) => {
+                    cb(*user, 1, std::ptr::null(), display);
+                }
+                EventToUI::Texture(display, _gpu) => {
+                    // iOS soft-render path; treat as rgba notify for native UI.
+                    cb(*user, 1, std::ptr::null(), display);
+                }
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 struct SessionHandler {
-    event_stream: Option<StreamSink<EventToUI>>,
+    event_stream: Option<EventSink>,
     // displays of current session.
     // We need this variable to check if the display is in use before pushing rgba to flutter.
     displays: Vec<usize>,
@@ -582,7 +626,7 @@ impl FlutterHandler {
             }
             if push {
                 if let Some(stream) = &session.event_stream {
-                    stream.add(EventToUI::Event(out.clone()));
+                    stream.send(EventToUI::Event(out.clone()));
                 }
             }
         }
@@ -884,7 +928,7 @@ impl InvokeUiSession for FlutterHandler {
         for (_, session) in self.session_handlers.read().unwrap().iter() {
             if session.renderer.on_texture(display, texture) {
                 if let Some(stream) = &session.event_stream {
-                    stream.add(EventToUI::Texture(display, true));
+                    stream.send(EventToUI::Texture(display, true));
                 }
             }
         }
@@ -1230,7 +1274,7 @@ impl FlutterHandler {
                 }
             }
             if let Some(stream) = &h.event_stream {
-                stream.add(EventToUI::Rgba(display));
+                stream.send(EventToUI::Rgba(display));
                 is_sent = true;
             }
         }
@@ -1260,7 +1304,7 @@ impl FlutterHandler {
             if use_texture_render || session.displays.len() > 1 {
                 if session.renderer.on_rgba(display, rgba) {
                     if let Some(stream) = &session.event_stream {
-                        stream.add(EventToUI::Texture(display, false));
+                        stream.send(EventToUI::Texture(display, false));
                     }
                 }
             }
@@ -1384,6 +1428,28 @@ pub fn session_start_(
     id: &str,
     event_stream: StreamSink<EventToUI>,
 ) -> ResultType<()> {
+    session_start_with_sink(session_id, id, EventSink::Flutter(event_stream))
+}
+
+/// Start a session delivering UI events via a native C callback (Swift client).
+pub fn session_start_native(
+    session_id: &SessionID,
+    id: &str,
+    cb: extern "C" fn(*mut c_void, c_int, *const c_char, usize),
+    user: *mut c_void,
+) -> ResultType<()> {
+    session_start_with_sink(
+        session_id,
+        id,
+        EventSink::Native { cb, user },
+    )
+}
+
+fn session_start_with_sink(
+    session_id: &SessionID,
+    id: &str,
+    event_stream: EventSink,
+) -> ResultType<()> {
     // is_connected is used to indicate whether to start a peer connection. For two cases:
     // 1. "Move tab to new window"
     // 2. multi ui session within the same peer connection.
@@ -1427,9 +1493,9 @@ pub fn session_start_(
 }
 
 #[inline]
-fn try_send_close_event(event_stream: &Option<StreamSink<EventToUI>>) {
+fn try_send_close_event(event_stream: &Option<EventSink>) {
     if let Some(stream) = &event_stream {
-        stream.add(EventToUI::Event("close".to_owned()));
+        stream.send(EventToUI::Event("close".to_owned()));
     }
 }
 

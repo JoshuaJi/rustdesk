@@ -35,6 +35,9 @@ mod bridge_generated;
 pub mod flutter;
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 pub mod flutter_ffi;
+/// C ABI for pure Swift iOS client (no Flutter engine).
+#[cfg(all(target_os = "ios", feature = "flutter"))]
+pub mod ios_native_ffi;
 use common::*;
 mod auth_2fa;
 #[cfg(not(target_os = "ios"))]
