@@ -93,11 +93,17 @@ struct HomeView: View {
                 }
             }
         }
-        .fullScreenCover(isPresented: $showRemote, onDismiss: {
-            session.close()
-            recents.reloadFromRust()
-        }) {
-            RemoteSessionView(session: session, isPresented: $showRemote)
+        // UIKit overFullScreen host — does not shrink for the software keyboard
+        // (SwiftUI fullScreenCover still applies keyboard safe-area insets).
+        .background(
+            RemoteSessionPresenter(isPresented: $showRemote, session: session)
+                .frame(width: 0, height: 0)
+        )
+        .onChange(of: showRemote) { presented in
+            if !presented {
+                session.close()
+                recents.reloadFromRust()
+            }
         }
         .onAppear {
             recents.load()

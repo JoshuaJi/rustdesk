@@ -186,7 +186,7 @@ struct MetalRemoteView: UIViewRepresentable {
 
 // MARK: - Touch + keyboard first-responder view
 
-final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDelegate {
+final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
     weak var coordinator: MetalRemoteView.Coordinator?
     weak var session: SessionController?
 
@@ -208,10 +208,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
     private let maxZoom: CGFloat = 6
 
     private var softKeyboardOn = false
-    /// Hidden field that actually owns the system soft keyboard (MTKView + UIKeyInput is unreliable).
-    private let softField = UITextField(frame: .zero)
-    /// Keeps the field non-empty so Backspace always fires `shouldChangeCharactersIn`.
-    private let softSentinel = "\u{200B}" // zero-width space
     private var keyboardObservers: [NSObjectProtocol] = []
 
     /// Remote peer cursor overlay (image from cursor_data / fallback arrow).
@@ -266,7 +262,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
 
     override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
-        setupSoftField()
         setupCursorOverlay()
         setupViewportGestures()
         setupKeyboardNotifications()
@@ -274,7 +269,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
 
     required init(coder: NSCoder) {
         super.init(coder: coder)
-        setupSoftField()
         setupCursorOverlay()
         setupViewportGestures()
         setupKeyboardNotifications()
@@ -282,37 +276,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
 
     deinit {
         keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
-    }
-
-    private func setupSoftField() {
-        softField.delegate = self
-        softField.autocorrectionType = .no
-        softField.autocapitalizationType = .none
-        softField.spellCheckingType = .no
-        softField.smartDashesType = .no
-        softField.smartQuotesType = .no
-        softField.smartInsertDeleteType = .no
-        softField.keyboardType = .default
-        softField.returnKeyType = .default
-        softField.textContentType = nil
-        softField.isSecureTextEntry = false
-        // Nearly invisible but still part of the hierarchy (zero-size can block keyboard).
-        softField.alpha = 0.01
-        softField.tintColor = .clear
-        softField.textColor = .clear
-        softField.backgroundColor = .clear
-        softField.isHidden = false
-        // Do not steal canvas taps; still works as first-responder for soft keyboard.
-        softField.isUserInteractionEnabled = false
-        softField.text = softSentinel
-        softField.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(softField)
-        NSLayoutConstraint.activate([
-            softField.widthAnchor.constraint(equalToConstant: 1),
-            softField.heightAnchor.constraint(equalToConstant: 1),
-            softField.leadingAnchor.constraint(equalTo: leadingAnchor),
-            softField.topAnchor.constraint(equalTo: topAnchor),
-        ])
+        SoftKeyboardHost.shared.hide(notify: false)
     }
 
     private func setupCursorOverlay() {
@@ -388,22 +352,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
     }
 
     private func setupKeyboardNotifications() {
-        let nc = NotificationCenter.default
-        keyboardObservers.append(nc.addObserver(
-            forName: UIResponder.keyboardWillHideNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, self.softKeyboardOn else { return }
-            // User dismissed keyboard (or HW keyboard took over) — sync toolbar state.
-            // Delay slightly so our own hide path can set softKeyboardOn first.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                guard let self, self.softKeyboardOn, !self.softField.isFirstResponder else { return }
-                self.softKeyboardOn = false
-                self.session?.softKeyboardVisible = false
-                self.claimHardwareFocus()
-            }
-        })
+        // Soft keyboard hide is owned by SoftKeyboardHost.onHide; no local field.
     }
 
     // MARK: First responder / soft keyboard
@@ -420,17 +369,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
 
     func setSoftKeyboard(_ on: Bool) {
         if on == softKeyboardOn {
-            if on, !softField.isFirstResponder {
-                presentSoftKeyboard()
-            }
+            if on { presentSoftKeyboard() }
             return
         }
         softKeyboardOn = on
         if on {
-            // Soft keyboard needs normal text input — pause shortcut stealing.
-            if session?.captureSystemShortcuts == true {
-                // Keep published flag; just avoid fighting while typing.
-            }
             presentSoftKeyboard()
         } else {
             dismissSoftKeyboard()
@@ -498,45 +441,15 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
         }
     }
 
-    // MARK: UITextFieldDelegate (soft keyboard text path)
-
-    func textField(
-        _ textField: UITextField,
-        shouldChangeCharactersIn range: NSRange,
-        replacementString string: String
-    ) -> Bool {
-        if string.isEmpty {
-            // Backspace / delete
-            session?.handleKey(character: "", usbHid: 0x2A, down: true)
-            session?.handleKey(character: "", usbHid: 0x2A, down: false)
-        } else if string == "\n" {
-            // Return key (some layouts deliver via shouldChange)
-            session?.handleKey(character: "\n", usbHid: 0x28, down: true)
-            session?.handleKey(character: "\n", usbHid: 0x28, down: false)
-        } else {
-            session?.inputString(string)
-        }
-        // Keep sentinel so the field never goes empty.
-        textField.text = softSentinel
-        return false
-    }
-
-    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
-        session?.handleKey(character: "\n", usbHid: 0x28, down: true)
-        session?.handleKey(character: "\n", usbHid: 0x28, down: false)
-        textField.text = softSentinel
-        return false
-    }
-
     // MARK: Hardware key presses
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Soft field is editing: let the text system handle (IME, etc.).
-        if softKeyboardOn, softField.isFirstResponder {
+        // Soft keyboard owns text input via SoftKeyboardHost; skip HW press remap.
+        if softKeyboardOn {
             super.pressesBegan(presses, with: event)
             return
         }
-        if captureSystemShortcuts || !softKeyboardOn {
+        if captureSystemShortcuts {
             handlePresses(presses, down: true)
             return
         }
@@ -544,11 +457,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if softKeyboardOn, softField.isFirstResponder {
+        if softKeyboardOn {
             super.pressesEnded(presses, with: event)
             return
         }
-        if captureSystemShortcuts || !softKeyboardOn {
+        if captureSystemShortcuts {
             handlePresses(presses, down: false)
             return
         }
@@ -556,11 +469,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        if softKeyboardOn, softField.isFirstResponder {
+        if softKeyboardOn {
             super.pressesCancelled(presses, with: event)
             return
         }
-        if captureSystemShortcuts || !softKeyboardOn {
+        if captureSystemShortcuts {
             handlePresses(presses, down: false)
             return
         }
