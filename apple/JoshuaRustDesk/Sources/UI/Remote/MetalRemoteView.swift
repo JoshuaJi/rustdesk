@@ -110,8 +110,9 @@ struct MetalRemoteView: UIViewRepresentable {
         func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
         func draw(in view: MTKView) {
-            if let (data, w, h) = session.pullFrame(), w > 0, h > 0 {
-                upload(data: data, width: w, height: h)
+            // Zero-copy path: upload BGRA straight from Rust buffer (no intermediate Data).
+            _ = session.withLatestFrame { pixels, w, h, bpr in
+                upload(pixels: pixels, width: w, height: h, bytesPerRow: bpr)
             }
             if let tv = view as? TouchMetalView {
                 tv.updateCursorOverlay()
@@ -157,8 +158,8 @@ struct MetalRemoteView: UIViewRepresentable {
             return SIMD4<Float>(x0, y0, x1 - x0, y1 - y0)
         }
 
-        private func upload(data: Data, width: Int, height: Int) {
-            guard let device else { return }
+        private func upload(pixels: UnsafeRawPointer, width: Int, height: Int, bytesPerRow: Int) {
+            guard let device, width > 0, height > 0 else { return }
             if texture == nil || tw != width || th != height {
                 let desc = MTLTextureDescriptor.texture2DDescriptor(
                     pixelFormat: .bgra8Unorm,
@@ -167,20 +168,18 @@ struct MetalRemoteView: UIViewRepresentable {
                     mipmapped: false
                 )
                 desc.usage = [.shaderRead]
+                desc.storageMode = .shared
                 texture = device.makeTexture(descriptor: desc)
                 tw = width
                 th = height
             }
             guard let texture else { return }
-            data.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                texture.replace(
-                    region: MTLRegionMake2D(0, 0, width, height),
-                    mipmapLevel: 0,
-                    withBytes: base,
-                    bytesPerRow: width * 4
-                )
-            }
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: pixels,
+                bytesPerRow: bytesPerRow
+            )
         }
     }
 }

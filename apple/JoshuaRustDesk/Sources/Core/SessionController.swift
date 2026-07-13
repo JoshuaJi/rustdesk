@@ -54,6 +54,8 @@ final class SessionController: ObservableObject {
     @Published var qualityCodec = ""
     @Published var showQualityHUD = true
     @Published var lastClipboardNote = ""
+    /// Preferred codec for host negotiate: auto / h264 / h265.
+    @Published var codecPreference: String = UserDefaults.standard.string(forKey: "codec_preference") ?? "h264"
 
     private(set) var sessionUUID: String = ""
     private var active = false
@@ -478,13 +480,43 @@ final class SessionController: ObservableObject {
         cursorEmbedded = false
     }
 
+    // MARK: - Codec (VideoToolbox path)
+
+    /// Prefer H.264/H.265 so the host encodes for VideoToolbox hard-decode.
+    func applyCodecPreference() {
+        guard active else { return }
+        let pref = codecPreference
+        UserDefaults.standard.set(pref, forKey: "codec_preference")
+        rd_main_set_option("codec-preference", pref)
+        rd_main_set_option("enable-hwcodec", "Y")
+        rd_session_set_codec_preference(sessionUUID, pref)
+        rd_session_refresh_decodings(sessionUUID)
+        statusText = "Codec: \(pref.uppercased()) (VT)"
+    }
+
+    func cycleCodecPreference() {
+        let order = ["h264", "h265", "auto"]
+        let idx = order.firstIndex(of: codecPreference) ?? 0
+        codecPreference = order[(idx + 1) % order.count]
+        applyCodecPreference()
+    }
+
+    /// True when quality status reports a hard-decodable format.
+    var isHardDecodeCodec: Bool {
+        let c = qualityCodec.lowercased()
+        return c.contains("h264") || c.contains("h265") || c.contains("hevc") || c.contains("avc")
+    }
+
     // MARK: - Frame pull
 
-    func pullFrame() -> (Data, Int, Int)? {
-        guard active else { return nil }
+    /// Zero-copy frame access: pointer is only valid inside `body` (before next_rgba).
+    /// Returns false when no new frame is available.
+    @discardableResult
+    func withLatestFrame(_ body: (_ pixels: UnsafeRawPointer, _ width: Int, _ height: Int, _ bytesPerRow: Int) -> Void) -> Bool {
+        guard active else { return false }
         let size = rd_session_get_rgba_size(sessionUUID, 0)
-        guard size > 0 else { return nil }
-        guard let ptr = rd_session_get_rgba(sessionUUID, 0) else { return nil }
+        guard size > 0 else { return false }
+        guard let ptr = rd_session_get_rgba(sessionUUID, 0) else { return false }
         var w = displayWidth
         var h = displayHeight
         if w <= 0 || h <= 0 {
@@ -501,17 +533,17 @@ final class SessionController: ObservableObject {
             w = max(1, Int(sqrt(Double(pixels))))
             h = max(1, pixels / w)
         }
-        // Soft-render path: adopt actual frame size when peer_info width was missing.
         if w > 1, h > 1, (displayWidth != w || displayHeight != h) {
-            // Only auto-fill when unknown; don't fight multi-monitor switch.
             if displayWidth <= 1 || displayHeight <= 1 {
                 displayWidth = w
                 displayHeight = h
             }
         }
-        let data = Data(bytes: ptr, count: min(size, w * h * 4))
+        // Tight BGRA rows (iOS align=1).
+        let bpr = w * 4
+        body(UnsafeRawPointer(ptr), w, h, bpr)
         rd_session_next_rgba(sessionUUID, 0)
-        return (data, w, h)
+        return true
     }
 
     private func parseDisplays(from obj: [String: Any]) {
@@ -577,6 +609,8 @@ final class SessionController: ObservableObject {
             parseDisplays(from: obj)
             statusText = "Peer ready \(displayWidth)×\(displayHeight)"
             refreshToggleState()
+            // Prefer VideoToolbox-friendly codecs once the peer is known.
+            applyCodecPreference()
         case "input-password", "session-login-password", "password":
             phase = .needPassword
             passwordPrompt = (obj["msg"] as? String) ?? "Enter password"

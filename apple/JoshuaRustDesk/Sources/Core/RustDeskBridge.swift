@@ -56,6 +56,12 @@ final class RustDeskBridge: ObservableObject {
         rd_main_set_option("enable-udp-punch", punch ? "Y" : "N")
         let ipv6 = d.bool(forKey: "enable_ipv6_punch")
         rd_main_set_option("enable-ipv6-punch", ipv6 ? "Y" : "N")
+
+        // VideoToolbox hard-decode: keep enabled so host can send H.264/H.265.
+        let hw = d.object(forKey: "enable_hwcodec") as? Bool ?? true
+        rd_main_set_option("enable-hwcodec", hw ? "Y" : "N")
+        let pref = d.string(forKey: "codec_preference") ?? "h264"
+        rd_main_set_option("codec-preference", pref)
     }
 
     func getOption(_ key: String) -> String {

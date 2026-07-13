@@ -44,6 +44,10 @@ char *rd_session_get_image_quality(const char *session_uuid);
 void rd_session_toggle_option(const char *session_uuid, const char *name);
 int rd_session_get_toggle_option(const char *session_uuid, const char *name);
 void rd_session_set_peer_option(const char *session_uuid, const char *name, const char *value);
+/// Re-send supported decodings (VideoToolbox H264/H265) so host can switch codec.
+void rd_session_refresh_decodings(const char *session_uuid);
+/// Prefer codec: "auto" | "h264" | "h265" | "vp8" | "vp9" | "av1".
+void rd_session_set_codec_preference(const char *session_uuid, const char *value);
 
 void rd_force_link(void);
 

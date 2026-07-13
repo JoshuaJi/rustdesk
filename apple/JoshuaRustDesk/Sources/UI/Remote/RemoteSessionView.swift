@@ -170,6 +170,13 @@ struct RemoteSessionView: View {
                 }
 
                 sidebarIconButton(
+                    systemName: session.isHardDecodeCodec ? "cpu.fill" : "cpu",
+                    label: "Codec \(session.codecPreference)"
+                ) {
+                    session.cycleCodecPreference()
+                }
+
+                sidebarIconButton(
                     systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
                     label: "Quality HUD"
                 ) {
@@ -293,6 +300,19 @@ struct RemoteSessionView: View {
                 Text(session.qualitySummary)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.9))
+            }
+            if session.isHardDecodeCodec {
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text("VT")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.green)
+            } else if !session.qualityCodec.isEmpty {
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text(session.qualityCodec)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
         }
         .padding(.horizontal, 12)

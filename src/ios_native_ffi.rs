@@ -6,10 +6,10 @@
 use crate::{
     flutter::{self, session_add, session_start_native},
     flutter_ffi::{
-        main_init, session_close, session_get_image_quality, session_get_toggle_option,
-        session_input_key, session_input_string, session_login, session_peer_option,
-        session_send_mouse, session_set_image_quality, session_set_size, session_toggle_option,
-        SessionID,
+        main_init, session_change_prefer_codec, session_close, session_get_image_quality,
+        session_get_toggle_option, session_input_key, session_input_string, session_login,
+        session_peer_option, session_send_mouse, session_set_image_quality, session_set_size,
+        session_toggle_option, SessionID,
     },
     ui_interface::{get_id, get_option, peer_to_map, set_option},
 };
@@ -326,6 +326,31 @@ pub extern "C" fn rd_session_set_peer_option(
     session_peer_option(sid, cstring_or_empty(name), cstring_or_empty(value));
 }
 
+/// Tell the host we can hard-decode H.264/H.265 (VideoToolbox) and re-negotiate codec.
+/// Call after peer_info / when user changes codec preference.
+#[no_mangle]
+pub extern "C" fn rd_session_refresh_decodings(session_uuid: *const c_char) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    session_change_prefer_codec(sid);
+}
+
+/// Prefer host encode as H.264 / H.265 / auto so iOS VideoToolbox can decode.
+#[no_mangle]
+pub extern "C" fn rd_session_set_codec_preference(
+    session_uuid: *const c_char,
+    value: *const c_char,
+) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    let v = cstring_or_empty(value);
+    // Peer-scoped option used by display settings on the host negotiate path.
+    session_peer_option(sid, "codec-preference".to_owned(), v);
+    session_change_prefer_codec(sid);
+}
+
 /// JSON array of recent peers from PeerConfig disk store.
 /// Each object: id, username, hostname, platform, alias (password hash omitted).
 #[no_mangle]
@@ -359,6 +384,8 @@ pub extern "C" fn rd_force_link() {
         rd_session_start as *const (),
         rd_session_set_image_quality as *const (),
         rd_session_toggle_option as *const (),
+        rd_session_refresh_decodings as *const (),
+        rd_session_set_codec_preference as *const (),
         rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),
     );
