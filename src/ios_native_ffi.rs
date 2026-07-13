@@ -342,12 +342,27 @@ pub type RdPcmCb = Option<
     ),
 >;
 
-/// Register iOS PCM sink. Pass `cb = None` (null) to clear.
+/// Register iOS PCM sink. Pass `cb = NULL` to clear.
 /// When set, Opus is decoded in Rust and PCM is delivered here instead of cpal.
 #[no_mangle]
-pub extern "C" fn rd_set_pcm_callback(cb: RdPcmCb, user: *mut c_void) {
+pub unsafe extern "C" fn rd_set_pcm_callback(
+    cb: Option<
+        extern "C" fn(
+            user: *mut c_void,
+            samples: *const f32,
+            sample_count: usize,
+            sample_rate: u32,
+            channels: u16,
+        ),
+    >,
+    user: *mut c_void,
+) {
     #[cfg(target_os = "ios")]
     {
+        log::info!(
+            "rd_set_pcm_callback: {}",
+            if cb.is_some() { "set" } else { "clear" }
+        );
         crate::client::set_ios_pcm_callback(cb, user);
     }
     #[cfg(not(target_os = "ios"))]

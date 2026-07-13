@@ -182,6 +182,12 @@ final class SessionController: ObservableObject {
         }
         active = true
 
+        // Prefer remote audio from the first OptionMessage (don't wait for peer_info).
+        if rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0 {
+            rd_session_toggle_option(sessionUUID, "disable-audio")
+            didEnsureAudio = true
+        }
+
         if !password.isEmpty {
             setStage("Authenticating…")
             rd_session_login(sessionUUID, password, rememberPassword ? 1 : 0)

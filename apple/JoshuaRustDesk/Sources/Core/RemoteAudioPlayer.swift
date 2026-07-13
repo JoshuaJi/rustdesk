@@ -1,355 +1,279 @@
+import AudioToolbox
 import AVFoundation
 import Foundation
 
-/// Plays remote desktop audio (interleaved f32 PCM from Rust Opus decode).
+/// Remote desktop audio player.
 ///
-/// Uses `AVAudioPlayerNode` + scheduled `AVAudioPCMBuffer`s — more reliable for
-/// packet streaming than `AVAudioSourceNode` (which was silent / crashed with
-/// interleaved formats).
+/// Pipeline: Rust Opus decode → interleaved f32 PCM callback → AudioQueue.
+/// AudioQueue is used instead of AVAudioEngine for simpler, more reliable
+/// streaming of fixed-rate PCM on iOS.
 final class RemoteAudioPlayer {
     static let shared = RemoteAudioPlayer()
 
     private let lock = NSLock()
-    private var sampleRate: Double = 0
-    private var channels: AVAudioChannelCount = 0
+    private var ring: [Float] = []
+    private let maxRingSamples = 48_000 * 2 * 3 // ~3s stereo @ 48k
 
-    private var engine: AVAudioEngine?
-    private var player: AVAudioPlayerNode?
-    private var format: AVAudioFormat?
+    private var sampleRate: Double = 0
+    private var channels: UInt32 = 0
+    private var bytesPerFrame: UInt32 = 0
+
+    private var queue: AudioQueueRef?
+    private var buffers: [AudioQueueBufferRef] = []
+    private let bufferCount = 4
+    private var bufferFrames: UInt32 = 1024
     private var running = false
     private var localMuted = false
-    private var pendingStart = false
-
-    /// Soft backlog limit: drop old buffers if player falls behind.
-    private var scheduledBuffers = 0
-    private let maxScheduledBuffers = 24
+    private var startedLogged = false
 
     private(set) var framesReceived: UInt64 = 0
-    private(set) var buffersPlayed: UInt64 = 0
+    private(set) var callbacksReceived: UInt64 = 0
 
-    private init() {
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleInterruption(_:)),
-            name: AVAudioSession.interruptionNotification,
-            object: AVAudioSession.sharedInstance()
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(handleRouteChange(_:)),
-            name: AVAudioSession.routeChangeNotification,
-            object: AVAudioSession.sharedInstance()
-        )
-    }
+    private init() {}
 
-    deinit {
-        stop()
-        NotificationCenter.default.removeObserver(self)
-    }
-
-    // MARK: - Public
+    // MARK: - Lifecycle
 
     func start() {
         configureSession()
         registerRustCallback()
-        NSLog("RemoteAudioPlayer: start (callback registered)")
+        NSLog("RemoteAudioPlayer: callback registered")
     }
 
     func stop() {
         clearRustCallback()
-        let work = { [weak self] in self?.teardownEngine() }
-        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
+        stopQueue()
         lock.lock()
+        ring.removeAll(keepingCapacity: true)
         framesReceived = 0
-        buffersPlayed = 0
-        scheduledBuffers = 0
+        callbacksReceived = 0
         sampleRate = 0
         channels = 0
-        pendingStart = false
+        startedLogged = false
         lock.unlock()
     }
 
     func setLocalMuted(_ muted: Bool) {
         localMuted = muted
-        DispatchQueue.main.async { [weak self] in
-            self?.player?.volume = muted ? 0 : 1
+        if muted {
+            lock.lock()
+            ring.removeAll(keepingCapacity: true)
+            lock.unlock()
         }
     }
 
-    // MARK: - PCM from Rust (decode thread)
+    // MARK: - PCM from Rust (audio thread)
 
     fileprivate func enqueue(samples: UnsafePointer<Float>, count: Int, rate: UInt32, ch: UInt16) {
         guard count > 0, ch > 0, rate >= 8000 else { return }
-        if localMuted { return }
-
-        let rateD = Double(rate)
-        let chCount = AVAudioChannelCount(ch)
-        let frames = count / Int(ch)
-        guard frames > 0 else { return }
 
         lock.lock()
-        framesReceived &+= UInt64(frames)
+        callbacksReceived &+= 1
+        let cbN = callbacksReceived
+        framesReceived &+= UInt64(count / max(1, Int(ch)))
+        let rateD = Double(rate)
+        let chU = UInt32(ch)
         let formatChanged = sampleRate < 1
             || abs(rateD - sampleRate) > 1
-            || chCount != channels
-        sampleRate = rateD
-        channels = max(1, chCount)
-        let needEngine = !running || formatChanged || pendingStart
-        // Copy out of Rust-owned memory before returning.
-        let copy = Array(UnsafeBufferPointer(start: samples, count: count))
-        let backlog = scheduledBuffers
-        lock.unlock()
+            || chU != channels
 
-        if backlog > maxScheduledBuffers {
-            // Player is stuck / engine not consuming — drop this packet.
-            return
+        if formatChanged {
+            sampleRate = rateD
+            channels = chU
+            bytesPerFrame = chU * UInt32(MemoryLayout<Float>.size)
+            // ~10–20 ms buffers
+            bufferFrames = max(256, UInt32(rate) / 50)
         }
 
-        if needEngine {
-            lock.lock()
-            pendingStart = true
-            lock.unlock()
-            let rateCopy = rateD
-            let chCopy = chCount
-            let pcm = copy
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.ensureEngine(rate: rateCopy, channels: chCopy)
-                self.schedule(pcm: pcm, frames: frames, channels: Int(chCopy))
+        if !localMuted {
+            let buf = UnsafeBufferPointer(start: samples, count: count)
+            ring.append(contentsOf: buf)
+            if ring.count > maxRingSamples {
+                ring.removeFirst(ring.count - maxRingSamples)
             }
-        } else {
-            // Schedule directly (PlayerNode is thread-safe for scheduleBuffer).
-            schedule(pcm: copy, frames: frames, channels: Int(chCount))
+        }
+        let needStart = !running || formatChanged
+        let ringCount = ring.count
+        lock.unlock()
+
+        if cbN == 1 || cbN % 200 == 0 {
+            NSLog("RemoteAudioPlayer: pcm#\(cbN) floats=\(count) rate=\(rate) ch=\(ch) ring=\(ringCount) running=\(running)")
+        }
+
+        if needStart {
+            let r = rateD
+            let c = chU
+            DispatchQueue.main.async { [weak self] in
+                self?.startQueue(rate: r, channels: c)
+            }
         }
     }
 
-    // MARK: - Engine
+    // MARK: - AVAudioSession
 
     private func configureSession() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .moviePlayback, options: [.mixWithOthers])
+            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
             try session.setActive(true)
         } catch {
             do {
                 try session.setCategory(.playback)
                 try session.setActive(true)
             } catch {
-                NSLog("RemoteAudioPlayer: AVAudioSession error \(error)")
+                NSLog("RemoteAudioPlayer: session error \(error)")
             }
         }
     }
 
-    private func ensureEngine(rate: Double, channels ch: AVAudioChannelCount) {
-        precondition(Thread.isMainThread)
-        if running,
-           let format,
-           abs(format.sampleRate - rate) < 1,
-           format.channelCount == ch,
-           engine?.isRunning == true,
-           player != nil {
-            lock.lock()
-            pendingStart = false
-            lock.unlock()
-            return
-        }
+    // MARK: - AudioQueue
 
-        teardownEngine()
+    private func startQueue(rate: Double, channels ch: UInt32) {
+        precondition(Thread.isMainThread)
+        stopQueue()
         configureSession()
 
-        guard rate >= 8000, ch >= 1, ch <= 8 else {
-            NSLog("RemoteAudioPlayer: invalid format rate=\(rate) ch=\(ch)")
+        guard rate >= 8000, ch >= 1, ch <= 8 else { return }
+
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: rate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat
+                | kAudioFormatFlagIsPacked
+                | kAudioFormatFlagsNativeEndian,
+            mBytesPerPacket: ch * UInt32(MemoryLayout<Float>.size),
+            mFramesPerPacket: 1,
+            mBytesPerFrame: ch * UInt32(MemoryLayout<Float>.size),
+            mChannelsPerFrame: ch,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+
+        var q: AudioQueueRef?
+        // Pass self as user data for the C callback.
+        let user = Unmanaged.passUnretained(self).toOpaque()
+        let status = AudioQueueNewOutput(
+            &asbd,
+            audioQueueOutputCallback,
+            user,
+            nil, // internal thread
+            nil,
+            0,
+            &q
+        )
+        guard status == noErr, let queue = q else {
+            NSLog("RemoteAudioPlayer: AudioQueueNewOutput failed \(status)")
             return
         }
 
-        // Non-interleaved float is the most portable PlayerNode format on iOS.
-        guard let fmt = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: rate,
-            channels: ch,
-            interleaved: false
-        ) else {
-            NSLog("RemoteAudioPlayer: could not create format")
-            return
+        self.queue = queue
+        self.sampleRate = rate
+        self.channels = ch
+        self.bytesPerFrame = ch * UInt32(MemoryLayout<Float>.size)
+        self.bufferFrames = max(256, UInt32(rate) / 50)
+
+        let bufBytes = bufferFrames * bytesPerFrame
+        buffers.removeAll()
+        for _ in 0..<bufferCount {
+            var buf: AudioQueueBufferRef?
+            let s = AudioQueueAllocateBuffer(queue, bufBytes, &buf)
+            if s == noErr, let buf {
+                buffers.append(buf)
+                // Prime with silence so the queue starts.
+                memset(buf.pointee.mAudioData, 0, Int(bufBytes))
+                buf.pointee.mAudioDataByteSize = bufBytes
+                AudioQueueEnqueueBuffer(queue, buf, 0, nil)
+            }
         }
 
-        let eng = AVAudioEngine()
-        let node = AVAudioPlayerNode()
-        eng.attach(node)
-        eng.connect(node, to: eng.mainMixerNode, format: fmt)
-        eng.mainMixerNode.outputVolume = 1.0
-        node.volume = localMuted ? 0 : 1
-
-        do {
-            eng.prepare()
-            try eng.start()
-            node.play()
-            engine = eng
-            player = node
-            format = fmt
+        let startStatus = AudioQueueStart(queue, nil)
+        if startStatus == noErr {
             running = true
-            lock.lock()
-            pendingStart = false
-            scheduledBuffers = 0
-            lock.unlock()
-            NSLog("RemoteAudioPlayer: engine started \(Int(rate)) Hz × \(ch) ch (PlayerNode)")
-        } catch {
-            NSLog("RemoteAudioPlayer: engine start failed \(error)")
-            eng.detach(node)
+            if !startedLogged {
+                startedLogged = true
+                NSLog("RemoteAudioPlayer: AudioQueue started \(Int(rate)) Hz × \(ch) ch")
+            }
+        } else {
+            NSLog("RemoteAudioPlayer: AudioQueueStart failed \(startStatus)")
+            AudioQueueDispose(queue, true)
+            self.queue = nil
             running = false
         }
     }
 
-    private func schedule(pcm: [Float], frames: Int, channels: Int) {
-        guard frames > 0, channels > 0 else { return }
-
-        // Ensure engine on main if missing.
-        if !running || player == nil || format == nil {
-            let rate: Double
-            let ch: AVAudioChannelCount
-            lock.lock()
-            rate = sampleRate
-            ch = channels > 0 ? AVAudioChannelCount(channels) : self.channels
-            lock.unlock()
-            let work = { [weak self] in
-                self?.ensureEngine(rate: rate, channels: ch)
-                self?.schedule(pcm: pcm, frames: frames, channels: channels)
-            }
-            if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
-            return
+    private func stopQueue() {
+        if let queue {
+            AudioQueueStop(queue, true)
+            AudioQueueDispose(queue, true)
         }
-
-        guard let player, let format else { return }
-        guard Int(format.channelCount) == channels else {
-            // Format mismatch — rebuild on main.
-            let rate = format.sampleRate
-            DispatchQueue.main.async { [weak self] in
-                self?.ensureEngine(rate: rate, channels: AVAudioChannelCount(channels))
-                self?.schedule(pcm: pcm, frames: frames, channels: channels)
-            }
-            return
-        }
-
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)) else {
-            return
-        }
-        buffer.frameLength = AVAudioFrameCount(frames)
-
-        // Rust PCM is interleaved LRLR… — deinterleave into planar floatChannelData.
-        guard let planes = buffer.floatChannelData else {
-            NSLog("RemoteAudioPlayer: buffer has no floatChannelData")
-            return
-        }
-        for f in 0..<frames {
-            let base = f * channels
-            for c in 0..<channels {
-                planes[c][f] = pcm[base + c]
-            }
-        }
-
-        lock.lock()
-        scheduledBuffers += 1
-        let nSched = scheduledBuffers
-        let nRecv = framesReceived
-        lock.unlock()
-
-        if nRecv % 200 == 0 {
-            NSLog("RemoteAudioPlayer: recv=\(nRecv) frames, scheduled=\(nSched)")
-        }
-
-        player.scheduleBuffer(buffer, completionHandler: { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            self.scheduledBuffers = max(0, self.scheduledBuffers - 1)
-            self.buffersPlayed &+= 1
-            self.lock.unlock()
-        })
-
-        if !player.isPlaying {
-            player.play()
-        }
+        queue = nil
+        buffers.removeAll()
+        running = false
     }
 
-    private func teardownEngine() {
-        if let player {
-            player.stop()
-            player.reset()
-        }
-        if let eng = engine {
-            if eng.isRunning { eng.stop() }
-            if let player { eng.detach(player) }
-        }
-        engine = nil
-        player = nil
-        format = nil
-        running = false
+    /// Called from AudioQueue realtime thread — fill next buffer from ring.
+    fileprivate func fill(buffer: AudioQueueBufferRef) {
+        let frames = Int(bufferFrames)
+        let ch = Int(max(1, channels))
+        let floatsNeeded = frames * ch
+        let byteCapacity = Int(buffer.pointee.mAudioDataBytesCapacity)
+        let dst = buffer.pointee.mAudioData.assumingMemoryBound(to: Float.self)
+
         lock.lock()
-        scheduledBuffers = 0
+        let available = min(floatsNeeded, ring.count)
+        if available > 0, !localMuted {
+            for i in 0..<available {
+                dst[i] = ring[i]
+            }
+            ring.removeFirst(available)
+        }
         lock.unlock()
+
+        // Pad with silence.
+        if available < floatsNeeded {
+            for i in available..<floatsNeeded {
+                dst[i] = 0
+            }
+        }
+
+        let bytes = min(floatsNeeded * MemoryLayout<Float>.size, byteCapacity)
+        buffer.pointee.mAudioDataByteSize = UInt32(bytes)
+
+        if let queue {
+            AudioQueueEnqueueBuffer(queue, buffer, 0, nil)
+        }
     }
 
     // MARK: - Rust bridge
 
     private func registerRustCallback() {
         let user = Unmanaged.passUnretained(self).toOpaque()
-        rd_set_pcm_callback(remoteAudioPcmTrampoline, user)
+        // Must use @convention(c) function pointer — see pcmTrampoline below.
+        rd_set_pcm_callback(pcmTrampoline, user)
     }
 
     private func clearRustCallback() {
         rd_set_pcm_callback(nil, nil)
     }
-
-    @objc private func handleInterruption(_ note: Notification) {
-        guard let info = note.userInfo,
-              let typeVal = info[AVAudioSessionInterruptionTypeKey] as? UInt,
-              let type = AVAudioSession.InterruptionType(rawValue: typeVal)
-        else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            switch type {
-            case .began:
-                self.teardownEngine()
-            case .ended:
-                self.configureSession()
-                let rate: Double
-                let ch: AVAudioChannelCount
-                self.lock.lock()
-                rate = self.sampleRate
-                ch = self.channels
-                self.lock.unlock()
-                if rate >= 8000, ch >= 1 {
-                    self.ensureEngine(rate: rate, channels: ch)
-                }
-            @unknown default:
-                break
-            }
-        }
-    }
-
-    @objc private func handleRouteChange(_ note: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.running else { return }
-            let rate: Double
-            let ch: AVAudioChannelCount
-            self.lock.lock()
-            rate = self.sampleRate
-            ch = self.channels
-            self.lock.unlock()
-            if rate >= 8000, ch >= 1 {
-                self.ensureEngine(rate: rate, channels: ch)
-            }
-        }
-    }
 }
 
-private func remoteAudioPcmTrampoline(
-    user: UnsafeMutableRawPointer?,
-    samples: UnsafePointer<Float>?,
-    sampleCount: Int,
-    sampleRate: UInt32,
-    channels: UInt16
-) {
+// MARK: - C callbacks (must be @convention(c))
+
+/// Rust → Swift PCM. `@convention(c)` is required for a valid C function pointer.
+private let pcmTrampoline: @convention(c) (
+    UnsafeMutableRawPointer?,
+    UnsafePointer<Float>?,
+    Int,
+    UInt32,
+    UInt16
+) -> Void = { user, samples, sampleCount, sampleRate, channels in
     guard let user, let samples, sampleCount > 0 else { return }
     let player = Unmanaged<RemoteAudioPlayer>.fromOpaque(user).takeUnretainedValue()
     player.enqueue(samples: samples, count: sampleCount, rate: sampleRate, ch: channels)
+}
+
+/// AudioQueue output callback (realtime thread).
+private let audioQueueOutputCallback: AudioQueueOutputCallback = { user, queue, buffer in
+    guard let user else { return }
+    let player = Unmanaged<RemoteAudioPlayer>.fromOpaque(user).takeUnretainedValue()
+    player.fill(buffer: buffer)
 }
