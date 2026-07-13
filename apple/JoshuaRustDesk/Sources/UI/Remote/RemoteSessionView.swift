@@ -133,12 +133,24 @@ struct RemoteSessionView: View {
                 session.softKeyboardVisible = next
             }
 
-            sidebarIconButton(
-                systemName: "doc.on.clipboard",
-                label: "Paste"
-            ) {
+            // Tap → true clipboard push; long-press → type as keystrokes.
+            Button {
                 session.pasteFromClipboard()
+            } label: {
+                Image(systemName: "doc.on.clipboard")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(Color.white.opacity(0.92))
+                    .frame(width: 40, height: 40)
+                    .background(Circle().fill(Color.white.opacity(0.08)))
             }
+            .buttonStyle(.plain)
+            .simultaneousGesture(
+                LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+                    session.typeClipboardAsKeystrokes()
+                }
+            )
+            .accessibilityLabel("Paste clipboard to peer")
+            .help("Tap: push clipboard · Long-press: type keystrokes")
 
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 

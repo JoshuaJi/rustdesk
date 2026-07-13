@@ -34,6 +34,8 @@ void rd_session_set_size(const char *session_uuid, size_t display, size_t width,
 
 void rd_session_send_mouse(const char *session_uuid, const char *json);
 void rd_session_input_string(const char *session_uuid, const char *value);
+/// Push text into the peer OS clipboard (not keystroke injection).
+void rd_session_send_clipboard(const char *session_uuid, const char *text);
 void rd_session_input_key(const char *session_uuid, const char *name, int down, int press, int alt,
                           int ctrl, int shift, int command);
 void rd_session_handle_key(const char *session_uuid, const char *character, int usb_hid,

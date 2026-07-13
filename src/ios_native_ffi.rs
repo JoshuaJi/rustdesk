@@ -222,6 +222,22 @@ pub extern "C" fn rd_session_input_string(session_uuid: *const c_char, value: *c
     session_input_string(sid, cstring_or_empty(value));
 }
 
+/// Push text into the remote peer's system clipboard (true clipboard sync).
+/// Prefer this over keystroke paste for large content / Cmd+V on the host.
+#[no_mangle]
+pub extern "C" fn rd_session_send_clipboard(session_uuid: *const c_char, text: *const c_char) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    let text = cstring_or_empty(text);
+    if text.is_empty() {
+        return;
+    }
+    if let Some(session) = flutter::sessions::get_session_by_session_id(&sid) {
+        session.send_clipboard_text(&text);
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn rd_session_input_key(
     session_uuid: *const c_char,
@@ -386,6 +402,7 @@ pub extern "C" fn rd_force_link() {
         rd_session_toggle_option as *const (),
         rd_session_refresh_decodings as *const (),
         rd_session_set_codec_preference as *const (),
+        rd_session_send_clipboard as *const (),
         rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),
     );

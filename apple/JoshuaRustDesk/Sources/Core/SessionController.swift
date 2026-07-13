@@ -56,6 +56,8 @@ final class SessionController: ObservableObject {
     @Published var lastClipboardNote = ""
     /// Preferred codec for host negotiate: auto / h264 / h265.
     @Published var codecPreference: String = UserDefaults.standard.string(forKey: "codec_preference") ?? "h264"
+    /// When true, iOS pasteboard changes are pushed to the peer automatically.
+    @Published var autoSyncClipboard: Bool = true
 
     private(set) var sessionUUID: String = ""
     private var active = false
@@ -66,11 +68,16 @@ final class SessionController: ObservableObject {
     private var currentCursorId: String = ""
     /// Only auto-disable view-only once per connection (don't fight user's toggle).
     private var didEnsureControlMode = false
+    /// Last text we wrote to / read from pasteboard for loop suppression.
+    private var lastPushedClipboard: String = ""
+    private var lastReceivedClipboard: String = ""
+    private var pasteboardObserver: NSObjectProtocol?
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
 
     deinit {
+        stopPasteboardObserver()
         close()
     }
 
@@ -95,7 +102,10 @@ final class SessionController: ObservableObject {
         qualityDelay = ""
         qualityCodec = ""
         lastClipboardNote = ""
+        lastPushedClipboard = ""
+        lastReceivedClipboard = ""
         resetCursorState()
+        startPasteboardObserver()
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
         RecentPeersStore.shared.record(
@@ -155,6 +165,7 @@ final class SessionController: ObservableObject {
             return
         }
         softKeyboardVisible = false
+        stopPasteboardObserver()
         // Release sticky modifiers on the peer while session is still active.
         clearModifiers(sendKeyUp: true)
         active = false
@@ -262,16 +273,40 @@ final class SessionController: ObservableObject {
         )
     }
 
-    /// Paste from iOS pasteboard into remote as text.
+    /// Push iOS pasteboard text into the peer's OS clipboard (true sync).
+    /// Peer can then ⌘V / Ctrl+V. Prefer this over keystroke injection for large text.
     func pasteFromClipboard() {
+        pushClipboardToPeer()
+    }
+
+    /// Push local pasteboard → peer system clipboard.
+    func pushClipboardToPeer() {
+        guard active, !viewOnly else {
+            lastClipboardNote = "Not connected"
+            return
+        }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            statusText = "Clipboard empty"
+            lastClipboardNote = "Clipboard empty"
+            return
+        }
+        rd_session_send_clipboard(sessionUUID, text)
+        statusText = "Clipboard → peer (\(text.count) chars)"
+        lastClipboardNote = "Pushed \(min(text.count, 999)) chars to peer"
+        // Remember so auto-sync does not echo peer→local→peer.
+        lastPushedClipboard = text
+    }
+
+    /// Type pasteboard into remote as keystrokes (legacy / when peer clipboard is disabled).
+    func typeClipboardAsKeystrokes() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
             statusText = "Clipboard empty"
             lastClipboardNote = "Clipboard empty"
             return
         }
         inputString(text)
-        statusText = "Pasted \(text.count) chars"
-        lastClipboardNote = "Pasted \(min(text.count, 999)) chars"
+        statusText = "Typed \(text.count) chars"
+        lastClipboardNote = "Typed \(min(text.count, 999)) chars"
     }
 
     // MARK: - Sticky modifiers (Sidecar-style)
@@ -677,9 +712,40 @@ final class SessionController: ObservableObject {
 
     private func handlePeerClipboard(_ obj: [String: Any]) {
         guard let content = stringValue(obj["content"]), !content.isEmpty else { return }
+        lastReceivedClipboard = content
         UIPasteboard.general.string = content
         lastClipboardNote = "Copied \(min(content.count, 999)) chars from peer"
         // Don't stomp statusText if user is mid-action; brief note is enough.
+    }
+
+    // MARK: - Clipboard auto-sync (iOS → peer)
+
+    func startPasteboardObserver() {
+        stopPasteboardObserver()
+        pasteboardObserver = NotificationCenter.default.addObserver(
+            forName: UIPasteboard.changedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.onLocalPasteboardChanged()
+        }
+    }
+
+    func stopPasteboardObserver() {
+        if let pasteboardObserver {
+            NotificationCenter.default.removeObserver(pasteboardObserver)
+            self.pasteboardObserver = nil
+        }
+    }
+
+    private func onLocalPasteboardChanged() {
+        guard active, phase == .connected, autoSyncClipboard, !viewOnly else { return }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        // Suppress echo when we just received from peer or just pushed.
+        if text == lastReceivedClipboard || text == lastPushedClipboard { return }
+        rd_session_send_clipboard(sessionUUID, text)
+        lastPushedClipboard = text
+        lastClipboardNote = "Synced \(min(text.count, 999)) chars → peer"
     }
 
     // MARK: - Cursor events

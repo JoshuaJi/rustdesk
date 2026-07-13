@@ -920,6 +920,38 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::Message(msg_out));
     }
 
+    /// Push text into the peer's system clipboard (not keystroke injection).
+    /// Used by mobile clients where OS clipboard listeners are unavailable.
+    /// Note: the `clipboard` module is not built for iOS, so we construct the
+    /// protobuf message here directly (single text format — universal).
+    pub fn send_clipboard_text(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if self.lc.read().unwrap().disable_clipboard.v {
+            log::info!("send_clipboard_text skipped: clipboard disabled");
+            return;
+        }
+        let compressed = hbb_common::compress::compress(text.as_bytes());
+        let compress = compressed.len() < text.as_bytes().len();
+        let content: Bytes = if compress {
+            compressed.into()
+        } else {
+            text.as_bytes().to_vec().into()
+        };
+        let cb = Clipboard {
+            compress,
+            content,
+            format: ClipboardFormat::Text.into(),
+            ..Default::default()
+        };
+        let mut msg = Message::new();
+        // Single Clipboard is understood by all peer versions; multi-clipboard
+        // requires the desktop clipboard module which is not linked on iOS.
+        msg.set_clipboard(cb);
+        self.send(Data::Message(msg));
+    }
+
     #[cfg(any(target_os = "ios"))]
     pub fn handle_flutter_raw_key_event(
         &self,
