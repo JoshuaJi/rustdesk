@@ -385,8 +385,10 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
         if isFirstResponder {
             resignFirstResponder()
         }
-        // Host the field in a secondary UIWindow so UIKit keyboard avoidance
-        // does not shrink the fullScreenCover (sidebar + canvas).
+        // Attach a 1×1 off-screen field to the session host (same key window).
+        // No secondary UIWindow: making a secondary window key blocked sidebar
+        // taps; restoring main as key after FR dismissed the keyboard.
+        // Layout push is prevented by RemoteSessionHostController.
         let host = SoftKeyboardHost.shared
         host.onInsert = { [weak self] text in
             if text == "\n" {
@@ -410,7 +412,7 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
         // Delay past the toolbar button's touch sequence.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.softKeyboardOn else { return }
-            host.show(in: self.window?.windowScene)
+            host.show(attachedTo: self)
         }
     }
 
