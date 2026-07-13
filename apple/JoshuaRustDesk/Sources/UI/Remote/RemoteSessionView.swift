@@ -76,12 +76,28 @@ struct RemoteSessionView: View {
                     failureOverlay(msg)
                 }
                 if session.phase == .connecting {
-                    ProgressView("Connecting…")
+                    VStack(spacing: 10) {
+                        ProgressView()
+                            .tint(.white)
+                        Text(session.connectionStage.isEmpty ? "Connecting…" : session.connectionStage)
+                            .font(.subheadline.weight(.medium))
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.center)
+                        if !session.peerId.isEmpty {
+                            Text(session.peerId)
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.65))
+                        }
+                        Button("Cancel") {
+                            session.close()
+                            isPresented = false
+                        }
+                        .buttonStyle(.bordered)
                         .tint(.white)
-                        .foregroundStyle(.white)
-                        .padding(16)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                        .allowsHitTesting(false)
+                        .padding(.top, 4)
+                    }
+                    .padding(20)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -362,21 +378,39 @@ struct RemoteSessionView: View {
     private var passwordSheet: some View {
         VStack(spacing: 12) {
             Text(session.passwordPrompt.isEmpty ? "Password required" : session.passwordPrompt)
+                .font(.headline)
                 .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 280)
-            Button("Submit") {
-                session.submitPassword(password)
+                .submitLabel(.go)
+                .onSubmit {
+                    session.submitPassword(password)
+                }
+            HStack(spacing: 12) {
+                Button("Cancel") {
+                    session.close()
+                    isPresented = false
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                Button("Submit") {
+                    session.submitPassword(password)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(password.isEmpty)
             }
-            .buttonStyle(.borderedProminent)
         }
-        .padding()
-        .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 12))
+        .padding(20)
+        .background(.black.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func failureOverlay(_ msg: String) -> some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.largeTitle)
+                .foregroundStyle(.orange)
             Text("Connection failed")
                 .font(.headline)
                 .foregroundStyle(.white)
@@ -384,14 +418,23 @@ struct RemoteSessionView: View {
                 .font(.footnote)
                 .foregroundStyle(.white.opacity(0.9))
                 .multilineTextAlignment(.center)
-            Button("Close") {
-                session.close()
-                isPresented = false
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 12) {
+                Button("Close") {
+                    session.close()
+                    isPresented = false
+                }
+                .buttonStyle(.bordered)
+                .tint(.white)
+                Button("Retry") {
+                    session.reconnect()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(.borderedProminent)
         }
-        .padding()
-        .background(.black.opacity(0.75), in: RoundedRectangle(cornerRadius: 12))
+        .padding(22)
+        .frame(maxWidth: 360)
+        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 14))
         .padding()
     }
 }

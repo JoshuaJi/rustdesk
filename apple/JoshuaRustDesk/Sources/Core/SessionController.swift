@@ -80,6 +80,10 @@ final class SessionController: ObservableObject {
     @Published var codecPreference: String = UserDefaults.standard.string(forKey: "codec_preference") ?? "h264"
     /// When true, iOS pasteboard changes are pushed to the peer automatically.
     @Published var autoSyncClipboard: Bool = true
+    /// Last hard failure message (also mirrored into `.failed`).
+    @Published private(set) var lastError: String = ""
+    /// Human-readable connection stage for HUD / home status.
+    @Published private(set) var connectionStage: String = ""
 
     private(set) var sessionUUID: String = ""
     private var active = false
@@ -94,6 +98,9 @@ final class SessionController: ObservableObject {
     private var lastPushedClipboard: String = ""
     private var lastReceivedClipboard: String = ""
     private var pasteboardObserver: NSObjectProtocol?
+    private var connectTimeoutWork: DispatchWorkItem?
+    /// Seconds to wait for peer_info / frames before failing.
+    private let connectTimeoutSeconds: TimeInterval = 45
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
@@ -111,7 +118,8 @@ final class SessionController: ObservableObject {
         self.rememberPassword = rememberPassword
         sessionUUID = UUID().uuidString
         phase = .connecting
-        statusText = "Connecting to \(peerId)…"
+        lastError = ""
+        setStage("Looking up \(peerId)…")
         softKeyboardVisible = false
         viewOnly = false
         didEnsureControlMode = false
@@ -132,6 +140,7 @@ final class SessionController: ObservableObject {
         displayHeight = 0
         resetCursorState()
         startPasteboardObserver()
+        armConnectTimeout()
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
         RecentPeersStore.shared.record(
@@ -146,9 +155,10 @@ final class SessionController: ObservableObject {
         if add != 0 {
             let msg = err.map { String(cString: $0) } ?? "session_add failed"
             if let e = err { rd_free_string(e) }
-            phase = .failed(msg)
+            fail(msg)
             return
         }
+        setStage("Contacting peer…")
 
         retainedSelf = Unmanaged.passRetained(self)
         let user = retainedSelf!.toOpaque()
@@ -158,20 +168,36 @@ final class SessionController: ObservableObject {
         if start != 0 {
             let msg = err.map { String(cString: $0) } ?? "session_start failed"
             if let e = err { rd_free_string(e) }
-            phase = .failed(msg)
+            fail(msg)
             releaseRetained()
             return
         }
         active = true
 
         if !password.isEmpty {
+            setStage("Authenticating…")
             rd_session_login(sessionUUID, password, rememberPassword ? 1 : 0)
+        } else {
+            setStage("Waiting for peer…")
         }
+    }
+
+    /// Re-run the last connection (same peer / password / relay prefs).
+    func reconnect() {
+        guard !peerId.isEmpty else { return }
+        connect(
+            peerId: peerId,
+            password: lastPassword,
+            forceRelay: lastForceRelay,
+            rememberPassword: rememberPassword
+        )
     }
 
     func submitPassword(_ password: String) {
         guard active else { return }
         lastPassword = password
+        setStage("Authenticating…")
+        armConnectTimeout()
         rd_session_login(sessionUUID, password, rememberPassword ? 1 : 0)
         if rememberPassword {
             RecentPeersStore.shared.record(
@@ -186,21 +212,80 @@ final class SessionController: ObservableObject {
     }
 
     func close() {
-        guard active || phase == .connecting || phase == .needPassword else {
+        cancelConnectTimeout()
+        let wasActive = active
+            || phase == .connecting
+            || phase == .needPassword
+            || {
+                if case .failed = phase { return true }
+                return false
+            }()
+        guard wasActive else {
             releaseRetained()
             return
         }
         softKeyboardVisible = false
         stopPasteboardObserver()
         // Release sticky modifiers on the peer while session is still active.
-        clearModifiers(sendKeyUp: true)
+        if active {
+            clearModifiers(sendKeyUp: true)
+        }
         active = false
         if !sessionUUID.isEmpty {
             rd_session_close(sessionUUID)
         }
         phase = .closed
         statusText = "Disconnected"
+        connectionStage = ""
         releaseRetained()
+    }
+
+    private func setStage(_ text: String) {
+        connectionStage = text
+        statusText = text
+    }
+
+    private func fail(_ message: String) {
+        cancelConnectTimeout()
+        lastError = message
+        phase = .failed(message)
+        statusText = message
+        connectionStage = "Failed"
+        active = false
+    }
+
+    private func armConnectTimeout() {
+        cancelConnectTimeout()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.phase == .connecting || self.phase == .needPassword else { return }
+            // needPassword is interactive — only timeout pure connecting.
+            guard self.phase == .connecting else { return }
+            self.fail("Connection timed out after \(Int(self.connectTimeoutSeconds))s. Check ID server, network, or try Force relay.")
+            if !self.sessionUUID.isEmpty {
+                rd_session_close(self.sessionUUID)
+            }
+            self.releaseRetained()
+        }
+        connectTimeoutWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + connectTimeoutSeconds, execute: work)
+    }
+
+    private func cancelConnectTimeout() {
+        connectTimeoutWork?.cancel()
+        connectTimeoutWork = nil
+    }
+
+    private func markConnected(summary: String? = nil) {
+        cancelConnectTimeout()
+        phase = .connected
+        connectionStage = "Connected"
+        if let summary, !summary.isEmpty {
+            statusText = summary
+        } else {
+            statusText = connectionSummary.isEmpty ? "Connected" : "Connected · \(connectionSummary)"
+        }
+        refreshToggleState()
     }
 
     // MARK: - Pointer / view
@@ -716,14 +801,19 @@ final class SessionController: ObservableObject {
                     self.frameTick &+= 1
                 }
                 if self.phase == .connecting {
-                    self.phase = .connected
-                    self.statusText = "Connected"
-                    self.refreshToggleState()
+                    self.markConnected()
                 }
             case 2:
+                self.cancelConnectTimeout()
                 self.active = false
+                // Don't overwrite an explicit failure with "closed".
+                if case .failed = self.phase {
+                    self.releaseRetained()
+                    return
+                }
                 self.phase = .closed
                 self.statusText = "Session closed"
+                self.connectionStage = "Closed"
                 self.releaseRetained()
             default:
                 break
@@ -743,28 +833,34 @@ final class SessionController: ObservableObject {
         case "peer_info":
             parseDisplays(from: obj)
             if hasMultipleDisplays {
-                statusText = "Peer ready · \(displaySummary) · \(displayWidth)×\(displayHeight)"
+                setStage("Peer ready · \(displaySummary) · \(displayWidth)×\(displayHeight)")
             } else {
-                statusText = "Peer ready \(displayWidth)×\(displayHeight)"
+                setStage("Peer ready \(displayWidth)×\(displayHeight)")
             }
             refreshToggleState()
             // Prefer VideoToolbox-friendly codecs once the peer is known.
             applyCodecPreference()
+            // First peer_info is a strong signal we're in; keep timeout for first frame.
         case "sync_peer_info":
             // Host added/removed monitors mid-session.
             parseDisplays(from: obj)
         case "input-password", "session-login-password", "password":
+            cancelConnectTimeout() // wait for user input
             phase = .needPassword
             passwordPrompt = (obj["msg"] as? String) ?? "Enter password"
-            statusText = passwordPrompt
+            setStage(passwordPrompt)
         case "msgbox":
             let text = (obj["text"] as? String) ?? (obj["title"] as? String) ?? raw
-            if (obj["type"] as? String)?.contains("error") == true {
-                phase = .failed(text)
+            let typ = (obj["type"] as? String) ?? ""
+            if typ.contains("error") || typ.contains("custom-error") || typ == "error" {
+                fail(text)
+            } else {
+                statusText = text
+                if phase == .connecting {
+                    connectionStage = text
+                }
             }
-            statusText = text
         case "connection_ready", "success":
-            phase = .connected
             if let s = stringValue(obj["secure"]) {
                 connectionSecure = s == "true" || s == "1"
             }
@@ -772,8 +868,7 @@ final class SessionController: ObservableObject {
                 connectionDirect = d == "true" || d == "1"
             }
             streamType = stringValue(obj["stream_type"]) ?? streamType
-            statusText = connectionSummary.isEmpty ? "Connected" : "Connected · \(connectionSummary)"
-            refreshToggleState()
+            markConnected()
         case "update_quality_status":
             handleQualityStatus(obj)
         case "clipboard":
@@ -806,11 +901,26 @@ final class SessionController: ObservableObject {
             }
         case "permission", "fingerprint":
             break
+        case "on_connection_ready", "on-connection-ready":
+            markConnected()
         default:
             if phase == .connecting {
-                statusText = name.isEmpty ? raw : name
+                let label = name.isEmpty ? raw : name
+                setStage(friendlyStage(label))
             }
         }
+    }
+
+    /// Map raw event names to short user-facing stages.
+    private func friendlyStage(_ raw: String) -> String {
+        let s = raw.lowercased()
+        if s.contains("relay") { return "Connecting via relay…" }
+        if s.contains("punch") || s.contains("udp") { return "Hole punching…" }
+        if s.contains("handshake") || s.contains("key") { return "Securing connection…" }
+        if s.contains("login") || s.contains("auth") { return "Authenticating…" }
+        if s.contains("wait") { return "Waiting for peer…" }
+        if raw.count > 48 { return String(raw.prefix(45)) + "…" }
+        return raw
     }
 
     private func handleQualityStatus(_ obj: [String: Any]) {
