@@ -49,12 +49,17 @@ struct ContentView: View {
                 .sheet(isPresented: $showSettings) {
                     NavigationStack {
                         SettingsView()
+                            .environmentObject(bridge)
                             .toolbar {
                                 ToolbarItem(placement: .cancellationAction) {
                                     Button("Done") { showSettings = false }
                                 }
                             }
                     }
+                    // Ensure sheet controls are interactive (Form pickers/toggles).
+                    .environmentObject(bridge)
+                    .tint(.white)
+                    .preferredColorScheme(.dark)
                 }
         }
     }

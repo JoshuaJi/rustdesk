@@ -70,8 +70,12 @@ final class RemoteGestureEngine {
         var twoFingerTapTravel: CGFloat = 24
         var twoFingerTapDuration: CFTimeInterval = 0.42
         var twoFingerDoubleInterval: CFTimeInterval = 0.32
-        var pinchCommitRatio: CGFloat = 0.12
-        var multiCommitTravel: CGFloat = 14
+        /// Span must change by this fraction to commit (or upgrade) to pinch.
+        /// Keep lower than multiCommitTravel tends to allow — otherwise two-finger
+        /// motion locks into scroll before pinch is recognized.
+        var pinchCommitRatio: CGFloat = 0.06
+        /// Centroid travel before scroll/pan commit (when not pinching).
+        var multiCommitTravel: CGFloat = 22
         var wheelStepPoints: CGFloat = 14
         var minZoom: CGFloat = 1
         var maxZoom: CGFloat = 6
@@ -428,21 +432,29 @@ final class RemoteGestureEngine {
         let dcx = c.x - m.lastCentroid.x
         let dcy = c.y - m.lastCentroid.y
 
-        if m.commit == nil {
-            if abs(spanRatio - 1) >= config.pinchCommitRatio {
-                m.commit = .pinch
+        // Pinch always wins: even if we already chose scroll/pan (common when fingers
+        // drift before spreading), upgrade to pinch once span change is clear.
+        if abs(spanRatio - 1) >= config.pinchCommitRatio {
+            if m.commit != .pinch {
+                // Re-base so zoom continues smoothly from the current level
+                // (avoids a jump after a scroll-then-pinch sequence).
                 m.baseZoom = delegate?.gestureEngineZoom ?? m.baseZoom
-                twoFingerTapWork?.cancel()
-            } else if m.maxTravel >= config.multiCommitTravel {
-                let zoom = delegate?.gestureEngineZoom ?? 1
-                m.commit = zoom > 1.05 ? .pan : .scroll
+                m.startSpan = max(s, 1)
+                m.commit = .pinch
                 twoFingerTapWork?.cancel()
             }
+        } else if m.commit == nil, m.maxTravel >= config.multiCommitTravel {
+            let zoom = delegate?.gestureEngineZoom ?? 1
+            m.commit = zoom > 1.05 ? .pan : .scroll
+            twoFingerTapWork?.cancel()
         }
+
+        // Fresh ratio after possible re-base of startSpan.
+        let liveRatio = s / max(m.startSpan, 1)
 
         switch m.commit {
         case .pinch:
-            let z = min(config.maxZoom, max(config.minZoom, m.baseZoom * spanRatio))
+            let z = min(config.maxZoom, max(config.minZoom, m.baseZoom * liveRatio))
             emit(.zoom(to: z, anchor: c))
         case .scroll:
             // Natural iOS: finger up → content up → wheel y positive in our earlier mapping.

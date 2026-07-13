@@ -12,6 +12,8 @@ struct RemoteSessionView: View {
     @State private var sidebarExpanded = true
     /// Fully hide the rail on compact (edge tab restores it).
     @State private var railHidden = false
+    /// Compact overflow tools panel (replaces SwiftUI `Menu`, which is dead under overFullScreen).
+    @State private var showToolsPanel = false
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
 
     private var isCompact: Bool { hSize == .compact }
@@ -39,35 +41,51 @@ struct RemoteSessionView: View {
                         .background(Color.black.opacity(0.92))
                 }
 
-                // HUD above desktop (not overlaid on the remote picture).
+                // Canvas + HUD. On iPhone: edge-to-edge video with floating status.
                 ZStack {
-                    VStack(spacing: 0) {
-                        topChrome
-                            .padding(.top, railHidden ? max(topSafe, 4) : 0)
-
-                        MetalRemoteView(
-                            session: session,
-                            onSize: { size in
-                                guard !session.softKeyboardVisible else { return }
-                                let s = UIScreen.main.scale
-                                session.setViewSize(
-                                    width: Int(size.width * s),
-                                    height: Int(size.height * s)
-                                )
-                            }
-                        )
-                        .padding(.horizontal, isCompact ? 6 : 10)
-                        .padding(.bottom, max(isCompact ? 6 : 10, bottomSafe > 0 ? 4 : 0))
-                        .padding(.trailing, railHidden && isCompact ? max(trailingSafe, 0) : 0)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .ignoresSafeArea(.keyboard)
-                    }
+                    MetalRemoteView(
+                        session: session,
+                        onSize: { size in
+                            guard !session.softKeyboardVisible else { return }
+                            let s = UIScreen.main.scale
+                            session.setViewSize(
+                                width: Int(size.width * s),
+                                height: Int(size.height * s)
+                            )
+                        }
+                    )
+                    .padding(.horizontal, isCompact ? 0 : 10)
+                    .padding(.bottom, isCompact ? 0 : 10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black)
+                    .ignoresSafeArea(.keyboard)
+
+                    VStack(spacing: 0) {
+                        if isCompact {
+                            // Floating status only — no reserved top bar, no drawer button.
+                            HStack(spacing: 8) {
+                                Spacer(minLength: 0)
+                                statusPill
+                                if !session.lastClipboardNote.isEmpty {
+                                    clipboardCapsule
+                                }
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.top, max(topSafe, 6))
+                            .allowsHitTesting(false)
+                        } else {
+                            topChromeIPad
+                        }
+                        Spacer(minLength: 0)
+                    }
 
                     if railHidden {
                         railRevealTab
+                            .padding(.top, isCompact ? max(topSafe, 8) : 0)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                    }
+
+                    if showToolsPanel {
+                        toolsPanelOverlay
                     }
 
                     if case .needPassword = session.phase {
@@ -81,18 +99,24 @@ struct RemoteSessionView: View {
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
                 .ignoresSafeArea(.keyboard)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
+        // Phone remote: edge-to-edge. Keyboard still ignored separately.
+        .ignoresSafeArea(isCompact ? .container : [], edges: isCompact ? .all : [])
         .ignoresSafeArea(.keyboard, edges: .all)
         .disableKeyboardLayoutShift()
-        .statusBarHidden(!isCompact) // keep status bar on phone for clock/signal
+        .statusBarHidden(true)
         .onAppear {
             session.captureSystemShortcuts = true
-            // Phone: start with advanced tools collapsed; keep primary rail.
-            if isCompact || isShortHeight {
+            // Phone: start rail hidden for max canvas; chevron reopens it.
+            if isCompact {
+                sidebarExpanded = false
+                railHidden = true
+            } else if isShortHeight {
                 sidebarExpanded = false
             }
         }
@@ -111,39 +135,30 @@ struct RemoteSessionView: View {
         }
     }
 
-    // MARK: - Top chrome
+    // MARK: - Top chrome (iPad: reserved strip; iPhone uses floating overlay)
 
-    private var topChrome: some View {
+    private var clipboardCapsule: some View {
+        Text(session.lastClipboardNote)
+            .font(.caption2)
+            .foregroundStyle(.white.opacity(0.9))
+            .lineLimit(1)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(.black.opacity(0.45), in: Capsule())
+            .frame(maxWidth: isCompact ? 120 : 200)
+            .transition(.opacity)
+    }
+
+    private var topChromeIPad: some View {
         HStack(spacing: 8) {
-            if railHidden {
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) { railHidden = false }
-                } label: {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(Color.white.opacity(0.1)))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Show toolbar")
-            }
             Spacer(minLength: 0)
             statusPill
             if !session.lastClipboardNote.isEmpty {
-                Text(session.lastClipboardNote)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(.black.opacity(0.45), in: Capsule())
-                    .frame(maxWidth: isCompact ? 120 : 200)
-                    .transition(.opacity)
+                clipboardCapsule
             }
         }
-        .padding(.horizontal, isCompact ? 8 : 12)
-        .padding(.vertical, isCompact ? 5 : 8)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
         .background(Color.black)
         .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
@@ -271,17 +286,16 @@ struct RemoteSessionView: View {
                     }
 
                     if isCompact {
-                        // Overflow menu instead of a long expanded list.
-                        Menu {
-                            advancedMenuItems
-                        } label: {
-                            Image(systemName: "ellipsis.circle")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(Color.white.opacity(0.92))
-                                .frame(width: hit, height: hit)
-                                .background(Circle().fill(Color.white.opacity(0.08)))
+                        // Custom panel — SwiftUI Menu does not receive taps under overFullScreen.
+                        sidebarIconButton(
+                            systemName: showToolsPanel ? "ellipsis.circle.fill" : "ellipsis.circle",
+                            label: "More tools",
+                            emphasized: showToolsPanel
+                        ) {
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                showToolsPanel.toggle()
+                            }
                         }
-                        .accessibilityLabel("More tools")
                     } else if sidebarExpanded {
                         Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
                         advancedToolButtons
@@ -318,6 +332,7 @@ struct RemoteSessionView: View {
                         label: "Hide toolbar"
                     ) {
                         withAnimation(.easeInOut(duration: 0.18)) {
+                            showToolsPanel = false
                             railHidden = true
                         }
                     }
@@ -369,49 +384,94 @@ struct RemoteSessionView: View {
         }
     }
 
-    @ViewBuilder
-    private var advancedMenuItems: some View {
-        Button {
-            session.captureSystemShortcuts.toggle()
-        } label: {
-            Label(
-                session.captureSystemShortcuts ? "Shortcuts on" : "Shortcuts off",
-                systemImage: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle"
-            )
-        }
-        Button {
-            session.toggleViewOnly()
-        } label: {
-            Label(
-                session.viewOnly ? "View only" : "Control mode",
-                systemImage: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill"
-            )
-        }
-        Button {
-            session.cycleQuality()
-        } label: {
-            Label("Quality: \(session.qualityLabel)", systemImage: "sparkles.tv")
-        }
-        Button {
-            session.cycleCodecPreference()
-        } label: {
-            Label("Codec: \(session.codecPreference)", systemImage: "cpu")
-        }
-        Button {
-            session.showQualityHUD.toggle()
-        } label: {
-            Label(
-                session.showQualityHUD ? "Hide quality HUD" : "Show quality HUD",
-                systemImage: "chart.bar"
-            )
-        }
-        if session.hasMultipleDisplays {
-            Button {
-                session.cycleDisplay()
-            } label: {
-                Label("Display \(session.displaySummary)", systemImage: "rectangle.on.rectangle")
+    /// Floating tools panel — tappable buttons (not UIMenu).
+    private var toolsPanelOverlay: some View {
+        ZStack(alignment: .leading) {
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.easeOut(duration: 0.15)) { showToolsPanel = false }
+                }
+
+            VStack(alignment: .leading, spacing: 0) {
+                toolsPanelRow(
+                    systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
+                    title: session.captureSystemShortcuts ? "Shortcuts on" : "Shortcuts off"
+                ) {
+                    session.captureSystemShortcuts.toggle()
+                }
+                toolsPanelRow(
+                    systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
+                    title: session.viewOnly ? "View only" : "Control mode"
+                ) {
+                    session.toggleViewOnly()
+                }
+                toolsPanelRow(
+                    systemName: "sparkles.tv",
+                    title: "Quality: \(session.qualityLabel)"
+                ) {
+                    session.cycleQuality()
+                }
+                toolsPanelRow(
+                    systemName: session.isHardDecodeCodec ? "cpu.fill" : "cpu",
+                    title: "Codec: \(session.codecPreference)"
+                ) {
+                    session.cycleCodecPreference()
+                }
+                toolsPanelRow(
+                    systemName: "chart.bar",
+                    title: session.showQualityHUD ? "Hide quality HUD" : "Show quality HUD"
+                ) {
+                    session.showQualityHUD.toggle()
+                }
+                if session.hasMultipleDisplays {
+                    toolsPanelRow(
+                        systemName: "rectangle.on.rectangle",
+                        title: "Display \(session.displaySummary)"
+                    ) {
+                        session.cycleDisplay()
+                    }
+                }
             }
+            .padding(.vertical, 8)
+            .frame(width: 260, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .padding(.leading, railHidden ? 36 : 8)
+            .padding(.top, 72)
+            .shadow(color: .black.opacity(0.45), radius: 20, y: 8)
         }
+        .transition(.opacity)
+        .zIndex(50)
+    }
+
+    private func toolsPanelRow(
+        systemName: String,
+        title: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button {
+            action()
+            // Keep panel open for multi-taps (quality cycle); user dismisses via dimmed area.
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: systemName)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 28)
+                Text(title)
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.white)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var hit: CGFloat { isCompact ? 44 : 40 }

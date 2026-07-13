@@ -12,23 +12,33 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("ID / Relay server") {
+            Section {
                 TextField("ID server", text: $idServer)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .textContentType(.URL)
                 TextField("Relay server (optional)", text: $relayServer)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .textContentType(.URL)
                 TextField("Key", text: $key)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
+                    .font(.body.monospaced())
+            } header: {
+                Text("ID / Relay server")
             }
-            Section("Connection") {
+
+            Section {
                 Toggle("Enable UDP hole punching", isOn: $enableUdpPunch)
                 Toggle("Enable IPv6 P2P connection", isOn: $enableIpv6Punch)
+            } header: {
+                Text("Connection")
             }
-            Section("Video (VideoToolbox)") {
+
+            Section {
                 Toggle("Hardware decode (VideoToolbox)", isOn: $enableHwcodec)
+                // navigationLink opens a real list on iPhone (default/.menu often feel dead).
                 Picker("Prefer codec", selection: $codecPreference) {
                     Text("Auto").tag("auto")
                     Text("H.264 (VT)").tag("h264")
@@ -37,15 +47,19 @@ struct SettingsView: View {
                     Text("VP9").tag("vp9")
                     Text("AV1").tag("av1")
                 }
+                .pickerStyle(.navigationLink)
+            } header: {
+                Text("Video (VideoToolbox)")
+            } footer: {
                 Text("H.264/H.265 use on-device VideoToolbox hard-decode. Soft codecs (VP8/AV1) use more CPU.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
+
             Section {
                 Button("Apply to Rust core") {
                     bridge.pushNetworkOptionsToRust()
                 }
             }
+
             Section("About") {
                 Text("Native Swift client (no Flutter)")
                 Text("Self-host: rustdesk.joshuajixu.com")
@@ -54,6 +68,9 @@ struct SettingsView: View {
             }
         }
         .navigationTitle("Settings")
+        .navigationBarTitleDisplayMode(.inline)
+        // Explicit interactive content — avoids hit-testing dead zones in some sheets.
+        .scrollContentBackground(.visible)
         .onDisappear {
             bridge.pushNetworkOptionsToRust()
         }
