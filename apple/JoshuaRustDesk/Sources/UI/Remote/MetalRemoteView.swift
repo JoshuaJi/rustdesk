@@ -1025,17 +1025,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         true
     }
 
-    func gestureRecognizer(
-        _ gestureRecognizer: UIGestureRecognizer,
-        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
-    ) -> Bool {
-        // Two-finger right-tap should beat pan when there is no movement.
-        if gestureRecognizer === twoFingerRightTap, otherGestureRecognizer is UIPanGestureRecognizer {
-            return true
-        }
-        return false
-    }
-
     /// Never let the 1×1 soft-keyboard field steal canvas hits.
     override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         let hit = super.hitTest(point, with: event)
