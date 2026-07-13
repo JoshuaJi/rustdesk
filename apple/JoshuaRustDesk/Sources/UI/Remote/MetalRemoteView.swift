@@ -187,7 +187,7 @@ struct MetalRemoteView: UIViewRepresentable {
 
 // MARK: - Touch + keyboard first-responder view
 
-final class TouchMetalView: MTKView, UITextFieldDelegate {
+final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDelegate {
     weak var coordinator: MetalRemoteView.Coordinator?
     weak var session: SessionController?
 
@@ -201,10 +201,12 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         }
     }
 
-    /// User zoom (1 = fit).
+    /// User zoom (1 = fit). Private set — mutated by viewport gestures.
     private(set) var userZoom: CGFloat = 1
     /// Pan offset in view points (applied after fit centering).
     private var panOffset: CGPoint = .zero
+    private let minZoom: CGFloat = 1
+    private let maxZoom: CGFloat = 6
 
     private var softKeyboardOn = false
     /// Hidden field that actually owns the system soft keyboard (MTKView + UIKeyInput is unreliable).
@@ -217,18 +219,15 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     private let cursorView = UIImageView()
     private var defaultCursorImage: UIImage?
 
-    /// Suppresses HW presses path while soft field is editing (text field handles it).
-    private var softKeyboardOnPublic: Bool { softKeyboardOn }
-
     private var cachedPriorityCommands: [UIKeyCommand]?
     private var activeTouches: [UITouch: CGPoint] = [:]
-    private var pinchStartZoom: CGFloat = 1
-    private var panStartOffset: CGPoint = .zero
-    private var isPinching = false
-    private var isTwoFingerPanning = false
-    private var lastTwoFingerMid: CGPoint?
-    private var pinchStartDistance: CGFloat = 0
+
+    // Viewport gestures (UIKit — smoother than hand-rolled multi-touch)
+    private var pinchBaseZoom: CGFloat = 1
     private var wheelAccumulator: CGFloat = 0
+    /// True while a 2-finger viewport gesture is active (suppress mouse).
+    private var viewportGestureActive = false
+    private var viewportGestureMoved = false
 
     // Shared single-finger tracking
     private var fingerStart: CGPoint?
@@ -243,21 +242,14 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     private let cursorSensitivity: CGFloat = 1.15
 
     // Touch mode (Sidecar-style absolute tablet)
-    /// Left button currently held on the peer (only after drag starts or explicit hold).
     private var touchModeLeftDown = false
-    /// True once movement crossed dragThreshold — subsequent moves are drag, not hover.
     private var touchModeDragging = false
     private var lastRemoteX = 0
     private var lastRemoteY = 0
-    /// Double-tap → double-click
     private var lastTapTime: CFTimeInterval = 0
     private var lastTapPoint: CGPoint = .zero
     private let doubleTapMaxInterval: CFTimeInterval = 0.32
     private let doubleTapMaxDistance: CGFloat = 36
-    /// Two-finger quick tap → right-click (if little movement)
-    private var multiFingerMoved = false
-    private var multiStartMid: CGPoint?
-    /// Long-press already fired (e.g. right-click) — ignore lift click.
     private var gestureConsumed = false
 
     /// Remote-cursor ON → cursor/trackpad mode; OFF → Sidecar touch mode.
@@ -269,6 +261,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         super.init(frame: frameRect, device: device)
         setupSoftField()
         setupCursorOverlay()
+        setupViewportGestures()
         setupKeyboardNotifications()
     }
 
@@ -276,6 +269,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         super.init(coder: coder)
         setupSoftField()
         setupCursorOverlay()
+        setupViewportGestures()
         setupKeyboardNotifications()
     }
 
@@ -622,15 +616,28 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
 
     // MARK: Viewport geometry
 
+    private var displaySize: (w: CGFloat, h: CGFloat) {
+        (
+            CGFloat(max(1, session?.displayWidth ?? 1)),
+            CGFloat(max(1, session?.displayHeight ?? 1))
+        )
+    }
+
+    /// Scale that fits the remote display in the view at zoom=1.
+    private var fitScale: CGFloat {
+        let (dw, dh) = displaySize
+        let vw = max(bounds.width, 1)
+        let vh = max(bounds.height, 1)
+        return min(vw / dw, vh / dh)
+    }
+
     /// Letterboxed remote content rect in view points (includes pan/zoom).
     func contentRect() -> CGRect {
-        let dw = CGFloat(max(1, session?.displayWidth ?? 1))
-        let dh = CGFloat(max(1, session?.displayHeight ?? 1))
+        let (dw, dh) = displaySize
         let vw = bounds.width
         let vh = bounds.height
         guard vw > 1, vh > 1 else { return bounds }
-        let fit = min(vw / dw, vh / dh)
-        let scale = fit * userZoom
+        let scale = fitScale * userZoom
         let cw = dw * scale
         let ch = dh * scale
         let ox = (vw - cw) / 2 + panOffset.x
@@ -648,15 +655,49 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         return (max(0, min(dw - 1, rx)), max(0, min(dh - 1, ry)))
     }
 
+    /// Clamp pan so zoomed content can be scrolled to every edge (no circular math).
     private func clampPan() {
-        let r = contentRect()
-        // Allow panning so content stays partially visible.
-        let vw = bounds.width
-        let vh = bounds.height
-        let maxX = max(0, (r.width - vw) / 2 + vw * 0.25)
-        let maxY = max(0, (r.height - vh) / 2 + vh * 0.25)
+        if userZoom <= 1.001 {
+            userZoom = 1
+            panOffset = .zero
+            return
+        }
+        let (dw, dh) = displaySize
+        let vw = max(bounds.width, 1)
+        let vh = max(bounds.height, 1)
+        let scale = fitScale * userZoom
+        let cw = dw * scale
+        let ch = dh * scale
+        // How far the content can slide while keeping the view filled when possible.
+        let maxX = max(0, (cw - vw) / 2)
+        let maxY = max(0, (ch - vh) / 2)
         panOffset.x = min(maxX, max(-maxX, panOffset.x))
         panOffset.y = min(maxY, max(-maxY, panOffset.y))
+    }
+
+    /// Zoom keeping `anchor` (view point) fixed on the same remote pixel.
+    private func setZoom(_ newZoom: CGFloat, anchor: CGPoint) {
+        let z = min(maxZoom, max(minZoom, newZoom))
+        let old = contentRect()
+        guard old.width > 1, old.height > 1 else {
+            userZoom = z
+            clampPan()
+            return
+        }
+        let fx = (anchor.x - old.minX) / old.width
+        let fy = (anchor.y - old.minY) / old.height
+        userZoom = z
+        let (dw, dh) = displaySize
+        let vw = max(bounds.width, 1)
+        let vh = max(bounds.height, 1)
+        let scale = fitScale * userZoom
+        let cw = dw * scale
+        let ch = dh * scale
+        // anchor = origin + fraction * size  →  origin = anchor - fraction * size
+        // origin = (view - size)/2 + pan  →  pan = origin - (view - size)/2
+        panOffset.x = anchor.x - fx * cw - (vw - cw) / 2
+        panOffset.y = anchor.y - fy * ch - (vh - ch) / 2
+        clampPan()
     }
 
     func resetViewport() {
@@ -664,18 +705,144 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         panOffset = .zero
     }
 
-    // MARK: Touches
+    // MARK: Viewport gestures (pinch + two-finger pan)
+
+    private func setupViewportGestures() {
+        let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+        pinch.delegate = self
+        addGestureRecognizer(pinch)
+
+        let pan = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerPan(_:)))
+        pan.minimumNumberOfTouches = 2
+        pan.maximumNumberOfTouches = 2
+        pan.delegate = self
+        addGestureRecognizer(pan)
+
+        // Two-finger double-tap → reset zoom (Photos/Maps style).
+        let resetTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerDoubleTap(_:)))
+        resetTap.numberOfTapsRequired = 2
+        resetTap.numberOfTouchesRequired = 2
+        resetTap.delegate = self
+        addGestureRecognizer(resetTap)
+
+        // Two-finger single tap → right-click (waits for double-tap reset to fail).
+        let rightTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerRightClick(_:)))
+        rightTap.numberOfTapsRequired = 1
+        rightTap.numberOfTouchesRequired = 2
+        rightTap.delegate = self
+        rightTap.require(toFail: resetTap)
+        addGestureRecognizer(rightTap)
+    }
+
+    @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
+        let anchor = g.location(in: self)
+        switch g.state {
+        case .began:
+            viewportGestureActive = true
+            viewportGestureMoved = false
+            pinchBaseZoom = userZoom
+            releaseAllButtons(at: nil)
+            cancelLongPress()
+            resetFingerState()
+        case .changed:
+            if abs(g.scale - 1) > 0.02 { viewportGestureMoved = true }
+            // g.scale is cumulative from gesture start → base * scale
+            setZoom(pinchBaseZoom * g.scale, anchor: anchor)
+        case .ended, .cancelled, .failed:
+            viewportGestureActive = false
+            // Snap almost-fit back to 1×
+            if userZoom < 1.05 {
+                resetViewport()
+            }
+        default:
+            break
+        }
+    }
+
+    @objc private func handleTwoFingerPan(_ g: UIPanGestureRecognizer) {
+        switch g.state {
+        case .began:
+            viewportGestureActive = true
+            viewportGestureMoved = false
+            wheelAccumulator = 0
+            releaseAllButtons(at: nil)
+            cancelLongPress()
+            resetFingerState()
+        case .changed:
+            let t = g.translation(in: self)
+            g.setTranslation(.zero, in: self)
+            if hypot(t.x, t.y) > 0.5 { viewportGestureMoved = true }
+
+            if userZoom > 1.02 {
+                // Pan the zoomed viewport (finger follows content).
+                panOffset.x += t.x
+                panOffset.y += t.y
+                clampPan()
+            } else {
+                // Fit view: two-finger drag = scroll wheel (Sidecar-like).
+                wheelAccumulator += t.y
+                let step: CGFloat = 16
+                while abs(wheelAccumulator) >= step {
+                    let dir = wheelAccumulator > 0 ? 1 : -1
+                    wheelAccumulator -= CGFloat(dir) * step
+                    // Natural: finger up → content moves up → negative wheel on many desktops
+                    sendWheel(deltaY: -dir * 100, at: g.location(in: self))
+                }
+            }
+        case .ended, .cancelled, .failed:
+            viewportGestureActive = false
+            wheelAccumulator = 0
+        default:
+            break
+        }
+    }
+
+    @objc private func handleTwoFingerDoubleTap(_ g: UITapGestureRecognizer) {
+        guard g.state == .ended else { return }
+        resetViewport()
+    }
+
+    @objc private func handleTwoFingerRightClick(_ g: UITapGestureRecognizer) {
+        guard g.state == .ended else { return }
+        // Don't right-click if a pinch/pan just moved the viewport.
+        guard !viewportGestureMoved else { return }
+        let p = g.location(in: self)
+        if isCursorMode {
+            session?.clickAtCursor(button: "right")
+        } else {
+            click(at: p, button: "right", count: 1)
+        }
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        // Allow pinch + two-finger pan together (standard map UX).
+        true
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldReceive touch: UITouch
+    ) -> Bool {
+        // Viewport gestures only care about multi-touch; single-finger stays on touches*.
+        true
+    }
+
+    // MARK: Touches (single-finger mouse only; pan/zoom via gesture recognizers)
     //
     // Sidecar-style touch mode (absolute):
     //   • Finger down  → hover (move only, NO button)
-    //   • Small lift   → click (down+up) at that point; double-tap → double-click
+    //   • Small lift   → click (down+up); double-tap → double-click
     //   • Move past threshold → left-down + drag; lift → left-up
-    //   • Two-finger drag → scroll wheel
-    //   • Two-finger quick tap → right-click
-    //   • Pinch → local viewport zoom
-    //
+    //   • Long-press → right-click
     // Cursor mode (trackpad):
-    //   • Drag moves remote cursor; tap clicks at cursor; long-press holds left
+    //   • Drag moves remote cursor; tap clicks; long-press holds left
+    // Viewport (both modes):
+    //   • Pinch → zoom about fingers
+    //   • Two-finger drag @ 1× → scroll wheel; when zoomed → pan view
+    //   • Two-finger double-tap → reset zoom
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
         if !softKeyboardOn {
@@ -684,31 +851,15 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        let fingerCount = activeTouches.count
 
-        if fingerCount >= 2 {
+        // Multi-touch: viewport gestures own it — cancel single-finger mouse work.
+        if activeTouches.count >= 2 || viewportGestureActive {
             cancelLongPress()
-            // Abort any in-progress single-finger drag/click.
             releaseAllButtons(at: touches.first.map { $0.location(in: self) })
-            fingerStart = nil
-            lastFinger = nil
-            fingerMoved = false
-            touchModeDragging = false
-
-            isPinching = false
-            isTwoFingerPanning = true
-            multiFingerMoved = false
-            let mid = midpoint(of: Set(activeTouches.keys))
-            multiStartMid = mid
-            lastTwoFingerMid = mid
-            pinchStartZoom = userZoom
-            panStartOffset = panOffset
-            pinchStartDistance = 0
+            resetFingerState()
             return
         }
 
-        isPinching = false
-        isTwoFingerPanning = false
         guard let t = touches.first else { return }
         let p = t.location(in: self)
 
@@ -725,7 +876,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             // Sidecar: hover to touch point — do NOT press the button yet.
             releaseAllButtons(at: p)
             sendMouse(type: "move", point: p, buttons: "")
-            // Long-press in touch mode → right-click (context menu).
             scheduleTouchModeLongPress(at: p)
         }
     }
@@ -734,18 +884,12 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        if activeTouches.count >= 2 {
-            isTwoFingerPanning = true
-            handleMultiTouch(Set(activeTouches.keys))
+        // Never drive mouse with multi-finger or during viewport gestures.
+        if activeTouches.count >= 2 || viewportGestureActive {
+            cancelLongPress()
+            releaseAllButtons(at: nil)
+            resetFingerState()
             return
-        }
-        // Drop stale multi flags if only one finger remains.
-        if isPinching || isTwoFingerPanning {
-            isPinching = false
-            isTwoFingerPanning = false
-            lastTwoFingerMid = nil
-            pinchStartDistance = 0
-            multiStartMid = nil
         }
 
         guard let t = touches.first, let start = fingerStart, let last = lastFinger else { return }
@@ -767,15 +911,12 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         // —— Touch mode (Sidecar absolute) ——
         if !touchModeDragging {
             if travel > dragThreshold {
-                // Promote to drag: press at the *start* point (where the user planted),
-                // then move to current — avoids “clicking” random mid-slide positions.
                 cancelLongPress()
                 touchModeDragging = true
                 fingerMoved = true
                 sendMouse(type: "down", point: start, buttons: "left")
                 sendMouse(type: "move", point: p, buttons: "")
             } else {
-                // Still a potential tap — just hover/follow under the finger.
                 sendMouse(type: "move", point: p, buttons: "")
             }
         } else {
@@ -785,30 +926,15 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         let endPoint = touches.first.map { $0.location(in: self) } ?? lastFinger
-        let endingMulti = isTwoFingerPanning || isPinching || activeTouches.count > 1
         for t in touches { activeTouches.removeValue(forKey: t) }
         cancelLongPress()
 
-        if activeTouches.count >= 2 {
-            return
-        }
-
-        // Finishing a multi-touch gesture.
-        if endingMulti || (multiStartMid != nil && activeTouches.isEmpty) {
-            let wasScrollOrPinch = multiFingerMoved || isPinching
-            let mid = multiStartMid
-            clearMultiState()
-            // Two-finger quick tap (little movement) → right-click.
-            if !wasScrollOrPinch, activeTouches.isEmpty {
-                if isCursorMode {
-                    session?.clickAtCursor(button: "right")
-                } else if let mid {
-                    click(at: mid, button: "right", count: 1)
-                }
+        // Still multi or viewport gesture — mouse end handled elsewhere.
+        if activeTouches.count >= 1 || viewportGestureActive {
+            if activeTouches.isEmpty {
+                releaseAllButtons(at: endPoint)
+                resetFingerState()
             }
-            // Ensure no stuck left button after multi interrupted a drag.
-            releaseAllButtons(at: endPoint)
-            resetFingerState()
             return
         }
 
@@ -816,7 +942,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             if leftHeldInCursorMode {
                 session?.mouseButtonAtCursor(type: "up", button: "left")
                 leftHeldInCursorMode = false
-            } else if !fingerMoved, activeTouches.isEmpty {
+            } else if !fingerMoved {
                 session?.clickAtCursor(button: "left")
             }
             resetFingerState()
@@ -827,14 +953,12 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         if gestureConsumed {
             releaseAllButtons(at: endPoint)
         } else if touchModeDragging || touchModeLeftDown {
-            // Finish drag: release at lift point.
             if let endPoint {
                 sendMouse(type: "up", point: endPoint, buttons: "left")
             } else {
                 releaseAllButtons(at: nil)
             }
-        } else if let endPoint, activeTouches.isEmpty {
-            // Tap (no significant movement) → clean click(s) at finger position.
+        } else if let endPoint {
             let now = CACurrentMediaTime()
             let dist = hypot(endPoint.x - lastTapPoint.x, endPoint.y - lastTapPoint.y)
             let isDouble = (now - lastTapTime) < doubleTapMaxInterval && dist < doubleTapMaxDistance
@@ -850,7 +974,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         let endPoint = touches.first.map { $0.location(in: self) }
         for t in touches { activeTouches.removeValue(forKey: t) }
         cancelLongPress()
-        clearMultiState()
         releaseAllButtons(at: endPoint)
         resetFingerState()
     }
@@ -862,16 +985,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         touchModeDragging = false
         leftHeldInCursorMode = false
         gestureConsumed = false
-    }
-
-    private func clearMultiState() {
-        isPinching = false
-        isTwoFingerPanning = false
-        lastTwoFingerMid = nil
-        pinchStartDistance = 0
-        wheelAccumulator = 0
-        multiFingerMoved = false
-        multiStartMid = nil
     }
 
     private func releaseAllButtons(at point: CGPoint?) {
@@ -939,61 +1052,7 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     private func contentToRemoteScale() -> CGFloat {
         let r = contentRect()
         let dw = CGFloat(max(1, session?.displayWidth ?? 1))
-        return r.width / dw
-    }
-
-    private func handleMultiTouch(_ touches: Set<UITouch>) {
-        let pts = touches.map { $0.location(in: self) }
-        guard pts.count >= 2 else { return }
-        let mid = CGPoint(x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2)
-        let dist = hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)
-
-        if pinchStartDistance <= 0 {
-            pinchStartDistance = dist
-            pinchStartZoom = userZoom
-            lastTwoFingerMid = mid
-            return
-        }
-
-        // Pinch vs scroll: large span change → zoom viewport; else two-finger scroll.
-        let spanDelta = abs(dist - pinchStartDistance)
-        if spanDelta > 24 {
-            isPinching = true
-            multiFingerMoved = true
-            let factor = dist / max(pinchStartDistance, 1)
-            userZoom = min(5, max(1, pinchStartZoom * factor))
-        }
-
-        if let last = lastTwoFingerMid {
-            let dx = mid.x - last.x
-            let dy = mid.y - last.y
-            if hypot(dx, dy) > 4 { multiFingerMoved = true }
-
-            if userZoom > 1.01, isPinching || spanDelta > 24 {
-                panOffset.x += dx
-                panOffset.y += dy
-                clampPan()
-            } else {
-                // Sidecar-style two-finger scroll → mouse wheel
-                wheelAccumulator += dy
-                let step: CGFloat = 18
-                while abs(wheelAccumulator) >= step {
-                    let dir = wheelAccumulator > 0 ? 1 : -1
-                    wheelAccumulator -= CGFloat(dir) * step
-                    // Invert so finger-up scrolls content up (natural).
-                    sendWheel(deltaY: -dir * 120, at: mid)
-                }
-            }
-        }
-        lastTwoFingerMid = mid
-    }
-
-    private func midpoint(of touches: Set<UITouch>) -> CGPoint {
-        let pts = touches.map { $0.location(in: self) }
-        guard !pts.isEmpty else { return .zero }
-        let sx = pts.reduce(0) { $0 + $1.x }
-        let sy = pts.reduce(0) { $0 + $1.y }
-        return CGPoint(x: sx / CGFloat(pts.count), y: sy / CGFloat(pts.count))
+        return max(r.width / dw, 0.001)
     }
 
     // MARK: Mouse JSON
