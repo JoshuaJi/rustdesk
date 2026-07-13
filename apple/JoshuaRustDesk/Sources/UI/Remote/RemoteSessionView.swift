@@ -58,19 +58,22 @@ struct RemoteSessionView: View {
                     .ignoresSafeArea(.keyboard)
 
                     VStack(spacing: 0) {
-                        if isCompact {
-                            HStack(spacing: 0) {
-                                Spacer(minLength: 0)
-                                hudPill
+                        if session.showQualityHUD {
+                            if isCompact {
+                                HStack(spacing: 0) {
+                                    Spacer(minLength: 0)
+                                    hudPill
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.top, 8)
+                                .allowsHitTesting(false)
+                            } else {
+                                topChromeIPad
                             }
-                            .padding(.horizontal, 10)
-                            .padding(.top, 8)
-                            .allowsHitTesting(false)
-                        } else {
-                            topChromeIPad
                         }
                         Spacer(minLength: 0)
                     }
+                    .animation(.easeOut(duration: 0.15), value: session.showQualityHUD)
 
                     if railHidden {
                         railRevealTab
@@ -316,9 +319,12 @@ struct RemoteSessionView: View {
         }
         sidebarIconButton(
             systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
-            label: "Quality HUD"
+            label: session.showQualityHUD ? "Hide status HUD" : "Show status HUD",
+            emphasized: session.showQualityHUD
         ) {
-            session.showQualityHUD.toggle()
+            withAnimation(.easeOut(duration: 0.15)) {
+                session.showQualityHUD.toggle()
+            }
         }
     }
 
@@ -357,10 +363,12 @@ struct RemoteSessionView: View {
                     session.cycleCodecPreference()
                 }
                 toolsPanelRow(
-                    systemName: "chart.bar",
-                    title: session.showQualityHUD ? "Hide quality HUD" : "Show quality HUD"
+                    systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
+                    title: session.showQualityHUD ? "Hide status HUD" : "Show status HUD"
                 ) {
-                    session.showQualityHUD.toggle()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        session.showQualityHUD.toggle()
+                    }
                 }
                 if session.hasMultipleDisplays {
                     toolsPanelRow(
@@ -476,7 +484,8 @@ struct RemoteSessionView: View {
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(session.connectionDirect ? 0.95 : 0.55))
 
-            if !isCompact, session.showQualityHUD, session.phase == .connected {
+            // Connection / quality metrics (shown whenever the HUD itself is visible).
+            if session.phase == .connected {
                 if !session.connectionSummary.isEmpty {
                     Text(session.connectionSummary)
                         .font(.caption2.weight(.semibold))
@@ -520,7 +529,7 @@ struct RemoteSessionView: View {
                     .minimumScaleFactor(0.75)
             }
 
-            // Display size always its own slot (stable label, no statusText stomp).
+            // Display size as its own slot.
             if session.displayWidth > 0, session.displayHeight > 0 {
                 Text("·").foregroundStyle(.white.opacity(0.35))
                 if session.hasMultipleDisplays {
@@ -544,7 +553,7 @@ struct RemoteSessionView: View {
         .padding(.horizontal, isCompact ? 10 : 12)
         .padding(.vertical, isCompact ? 5 : 7)
         .background(.black.opacity(0.5), in: Capsule())
-        // Rebuild whole capsule on structure change — no partial-layout morph trail.
+        // Snap content updates; whole pill show/hide is animated by parent.
         .id(hudStructureKey)
         .transaction { $0.animation = nil }
     }
