@@ -1,17 +1,23 @@
 import UIKit
 
-/// Soft keyboard host: a **1×1 off-screen** `UITextField` attached to the remote
-/// session host view (same key window as the UI).
+/// Soft keyboard via a **pass-through key window**.
 ///
-/// Design goals:
-/// - Keyboard appears via `becomeFirstResponder` in the **already-key** session window
-/// - Field never covers sidebar/canvas (off-screen frame, no secondary overlay window)
-/// - Session layout does not shrink — that is owned by `RemoteSessionHostController`
+/// Why a secondary window again?
+/// - Hosting a `UITextField` as a SwiftUI / `UIHostingController` sibling is
+///   unreliable (layout thrash, stripped subviews, FR fights with Metal).
+/// - Attaching FR to the metal view works sometimes, but a dedicated key window
+///   is the most reliable way to force the system keyboard up.
 ///
-/// History:
-/// - Full-screen secondary `UIWindow` → keyboard OK, sidebar untappable
-/// - 1×1 secondary window + `makeKey()` back to main → sidebar OK, keyboard gone
-///   (iOS dismisses the keyboard when the FR window loses key status)
+/// Why this does **not** block the sidebar:
+/// - The window's `hitTest` **always returns nil**, so every touch falls through
+///   to the session window underneath (sidebar + canvas).
+/// - The system keyboard lives in its own UIKit window and still receives taps.
+///
+/// Why the previous 1×1 window failed:
+/// - It called `main.makeKey()` after `becomeFirstResponder`. iOS binds the
+///   soft keyboard to the **key** window's first responder, so restoring key
+///   status immediately dismissed the keyboard. **We never restore main key**
+///   while the soft keyboard is visible.
 final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
     static let shared = SoftKeyboardHost()
 
@@ -19,11 +25,26 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
     var onDelete: (() -> Void)?
     var onHide: (() -> Void)?
 
-    private var isShowing = false
+    private(set) var isShowing = false
     private let sentinel = "\u{200B}"
+    private weak var mainWindow: UIWindow?
+    private var hideObserver: NSObjectProtocol?
+    private var showRetry = 0
+
+    private lazy var keyboardWindow: PassThroughWindow = {
+        let w = PassThroughWindow(frame: UIScreen.main.bounds)
+        w.backgroundColor = .clear
+        w.windowLevel = .alert + 1 // above session UI for key status; hits pass through
+        w.isHidden = true
+        let vc = UIViewController()
+        vc.view.backgroundColor = .clear
+        // Root view must exist for the field; hits still pass through via window.
+        w.rootViewController = vc
+        return w
+    }()
 
     private lazy var field: UITextField = {
-        let f = UITextField(frame: CGRect(x: -100, y: -100, width: 1, height: 1))
+        let f = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
         f.delegate = self
         f.autocorrectionType = .no
         f.autocapitalizationType = .none
@@ -34,31 +55,27 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         f.keyboardType = .default
         f.returnKeyType = .default
         f.textContentType = nil
-        f.alpha = 0.01
+        f.alpha = 0.02
         f.tintColor = .clear
         f.textColor = .clear
         f.backgroundColor = .clear
-        // Programmatic FR works with interaction off; field never steals taps.
-        // Keep isEnabled = true (UIControl) and isHidden = false (required).
         f.isEnabled = true
-        f.isUserInteractionEnabled = false
+        f.isUserInteractionEnabled = true
         f.isAccessibilityElement = false
         f.text = sentinel
         return f
     }()
 
-    private var hideObserver: NSObjectProtocol?
-
     private override init() {
         super.init()
         hideObserver = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardWillHideNotification,
+            forName: UIResponder.keyboardDidHideNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
             guard let self, self.isShowing else { return }
             DispatchQueue.main.async {
-                // User dismissed keyboard (e.g. swipe-down) — sync toolbar state.
+                // If we still intend to show but FR was lost, clear state.
                 if self.isShowing, !self.field.isFirstResponder {
                     self.hide(notify: true)
                 }
@@ -72,95 +89,96 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         }
     }
 
-    /// Show the soft keyboard by focusing a field inside `hostView`'s window.
-    /// Prefer the keyboard-immune `RemoteSessionHostController.view`.
+    /// Show soft keyboard. Prefer `attachedTo` for scene resolution; the field
+    /// itself lives in the pass-through window.
     func show(attachedTo hostView: UIView) {
-        let target = preferredHostView(from: hostView)
+        show(in: hostView.window?.windowScene)
+    }
 
-        if field.superview !== target {
-            field.removeFromSuperview()
-            target.addSubview(field)
+    func show(in scene: UIWindowScene?) {
+        let scene = scene
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        guard let scene else { return }
+
+        // Remember main window only so we can restore key status on hide.
+        mainWindow = scene.windows
+            .filter { $0 !== keyboardWindow && !$0.isHidden }
+            .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+            .first
+            ?? hostKeyWindow(in: scene)
+
+        keyboardWindow.windowScene = scene
+        keyboardWindow.frame = scene.coordinateSpace.bounds
+        keyboardWindow.isHidden = false
+
+        if field.superview == nil {
+            let root = keyboardWindow.rootViewController!.view!
+            field.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
+            root.addSubview(field)
         }
-        // Keep off-screen so hit-testing never hits the field.
-        field.frame = CGRect(x: -100, y: -100, width: 1, height: 1)
         field.text = sentinel
         isShowing = true
+        showRetry = 0
 
-        // Session host window is already key (presented overFullScreen). Ensure it.
-        target.window?.makeKey()
+        // Critical: this window stays KEY while the soft keyboard is up.
+        // Do NOT call mainWindow.makeKey() here.
+        keyboardWindow.makeKeyAndVisible()
 
-        // Delay past the toolbar button's touch end so we don't lose FR immediately.
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isShowing else { return }
-            self.targetWindowMakeKey(for: target)
-            let ok = self.field.becomeFirstResponder()
-            if !ok {
-                // Retry once after layout (host may still be animating).
-                DispatchQueue.main.async { [weak self] in
-                    guard let self, self.isShowing else { return }
-                    self.targetWindowMakeKey(for: target)
-                    _ = self.field.becomeFirstResponder()
+            self?.focusField()
+        }
+    }
+
+    private func focusField() {
+        guard isShowing else { return }
+        // Re-assert key (something in SwiftUI may have stolen it).
+        keyboardWindow.makeKeyAndVisible()
+        let ok = field.becomeFirstResponder()
+        if !ok || !field.isFirstResponder {
+            showRetry += 1
+            if showRetry < 6 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                    self?.focusField()
                 }
             }
         }
     }
 
-    /// Legacy entry: resolve scene → key window → attach there.
-    func show(in scene: UIWindowScene?) {
-        let scene = scene
-            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        guard let scene else { return }
-        let window = scene.windows.first(where: \.isKeyWindow)
-            ?? scene.windows.first(where: { !$0.isHidden })
-        guard let root = window?.rootViewController else { return }
-        let host = topMost(from: root).view ?? root.view!
-        show(attachedTo: host)
-    }
-
     func hide(notify: Bool) {
-        guard isShowing || field.isFirstResponder else { return }
+        guard isShowing || field.isFirstResponder else {
+            // Still restore key if our window is lingering.
+            if !keyboardWindow.isHidden {
+                keyboardWindow.isHidden = true
+                restoreMainKeyWindow()
+            }
+            return
+        }
         isShowing = false
         field.resignFirstResponder()
-        // Leave field in hierarchy; cheap and avoids re-add churn.
+        keyboardWindow.isHidden = true
+        restoreMainKeyWindow()
         if notify {
             onHide?()
         }
     }
 
-    // MARK: Host resolution
-
-    /// Prefer `RemoteSessionHostController.view` (safeAreaRegions / forceFullWindowFrame).
-    private func preferredHostView(from view: UIView) -> UIView {
-        var responder: UIResponder? = view
-        while let r = responder {
-            if let host = r as? RemoteSessionHostController {
-                return host.view
-            }
-            responder = r.next
-        }
-        // Walk VC chain from nearest.
-        var vc = view.findViewController()
-        while let current = vc {
-            if let host = current as? RemoteSessionHostController {
-                return host.view
-            }
-            if let presented = current.presentedViewController as? RemoteSessionHostController {
-                return presented.view
-            }
-            vc = current.parent ?? current.presentingViewController
-        }
-        return view
+    private func hostKeyWindow(in scene: UIWindowScene) -> UIWindow? {
+        scene.windows.first(where: \.isKeyWindow)
+            ?? scene.windows.first(where: { !$0.isHidden })
     }
 
-    private func targetWindowMakeKey(for view: UIView) {
-        view.window?.makeKey()
-    }
-
-    private func topMost(from vc: UIViewController) -> UIViewController {
-        if let presented = vc.presentedViewController {
-            return topMost(from: presented)
+    private func restoreMainKeyWindow() {
+        if let main = mainWindow, !main.isHidden {
+            main.makeKey()
+            return
         }
-        return vc
+        if let scene = keyboardWindow.windowScene {
+            scene.windows
+                .filter { $0 !== keyboardWindow && !$0.isHidden }
+                .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+                .first?
+                .makeKey()
+        }
     }
 
     // MARK: UITextFieldDelegate
@@ -188,13 +206,13 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
     }
 }
 
-private extension UIView {
-    func findViewController() -> UIViewController? {
-        var r: UIResponder? = self
-        while let cur = r {
-            if let vc = cur as? UIViewController { return vc }
-            r = cur.next
-        }
-        return nil
+// MARK: - Pass-through window
+
+/// Full-screen window that can be key (for keyboard FR) but never intercepts hits.
+private final class PassThroughWindow: UIWindow {
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        // Always nil → touches fall through to the session window (sidebar/canvas).
+        // The system keyboard uses a separate window and is unaffected.
+        nil
     }
 }

@@ -186,7 +186,7 @@ struct MetalRemoteView: UIViewRepresentable {
 
 // MARK: - Touch + keyboard first-responder view
 
-final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
+final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     weak var coordinator: MetalRemoteView.Coordinator?
     weak var session: SessionController?
 
@@ -209,6 +209,47 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
 
     private var softKeyboardOn = false
     private var keyboardObservers: [NSObjectProtocol] = []
+    /// Fallback text field (subview of *this* view — never a secondary window /
+    /// never a UIHostingController sibling that SwiftUI may strip).
+    private lazy var softField: SoftKeyboardField = {
+        let f = SoftKeyboardField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        f.delegate = f
+        f.isHidden = false
+        f.alpha = 0.01
+        f.tintColor = .clear
+        f.textColor = .clear
+        f.backgroundColor = .clear
+        f.autocorrectionType = .no
+        f.autocapitalizationType = .none
+        f.spellCheckingType = .no
+        f.smartDashesType = .no
+        f.smartQuotesType = .no
+        f.smartInsertDeleteType = .no
+        f.keyboardType = .default
+        f.returnKeyType = .default
+        f.textContentType = nil
+        f.isEnabled = true
+        // Interaction on is more reliable for FR; field is 1×1 under content and
+        // hit-testing is overridden so sidebar/canvas never lose taps to it.
+        f.isUserInteractionEnabled = true
+        f.isAccessibilityElement = false
+        f.text = SoftKeyboardField.sentinel
+        f.onInsert = { [weak self] text in
+            guard let self, self.softKeyboardOn else { return }
+            if text == "\n" || text == "\r" {
+                self.session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+                self.session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+            } else {
+                self.session?.inputString(text)
+            }
+        }
+        f.onDelete = { [weak self] in
+            guard let self, self.softKeyboardOn else { return }
+            self.session?.handleKey(character: "", usbHid: 0x2A, down: true)
+            self.session?.handleKey(character: "", usbHid: 0x2A, down: false)
+        }
+        return f
+    }()
 
     /// Remote peer cursor overlay (image from cursor_data / fallback arrow).
     private let cursorView = UIImageView()
@@ -278,6 +319,8 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
         keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
         SoftKeyboardHost.shared.hide(notify: false)
     }
+
+
 
     private func setupCursorOverlay() {
         cursorView.contentMode = .scaleAspectFit
@@ -352,28 +395,88 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
     }
 
     private func setupKeyboardNotifications() {
-        // Soft keyboard hide is owned by SoftKeyboardHost.onHide; no local field.
+        keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        keyboardObservers.removeAll()
+        // User swipe-dismissed the software keyboard — sync toolbar toggle.
+        let hide = NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardDidHideNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.softKeyboardOn else { return }
+            // Only clear if we no longer own text input (system really hid it).
+            // Keep state if we are still FR and merely reloading input views.
+            if !self.isFirstResponder || self.inputView != nil {
+                // When soft keyboard mode is on, inputView is nil; if hide fired
+                // while we still want soft KB, try to re-show once.
+            }
+            // If user explicitly dismissed (we stay FR with empty inputView only
+            // after we set softKeyboardOn=false). Detect: soft on + no keyboard frame.
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.softKeyboardOn else { return }
+                // If still FR with system inputView (nil) but keyboard gone, user
+                // dismissed — flip toolbar off. Hardware keyboard connected also
+                // hides soft keyboard without resigning FR; leave toggle on so a
+                // second tap can retry, and do not auto-clear in that case.
+                // Heuristic: if we are not FR, clear. If we are FR, leave alone
+                // (HW keyboard / temporary hide).
+                if !self.isFirstResponder {
+                    self.softKeyboardOn = false
+                    self.session?.softKeyboardVisible = false
+                    self.claimHardwareFocus()
+                }
+            }
+        }
+        keyboardObservers.append(hide)
     }
 
     // MARK: First responder / soft keyboard
+    //
+    // Soft keyboard is owned by *this* view via UIKeyInput — no secondary
+    // UIWindow / UITextField. That avoids:
+    //  • key-window restore killing the keyboard
+    //  • full-screen overlay blocking sidebar taps
+    //  • UIHostingController stripping unmanaged sibling text fields
+    // Layout push is blocked by RemoteSessionHostController.
 
-    /// Hardware keys (BT / Magic Keyboard) when soft keyboard is hidden.
-    override var canBecomeFirstResponder: Bool { !softKeyboardOn }
+    /// Always claim FR: HW keys when soft keyboard off, system KB when on.
+    override var canBecomeFirstResponder: Bool { true }
 
-    /// Empty input view so claiming first responder does not pop the soft keyboard.
-    override var inputView: UIView? {
+    /// Cached empty input view — returning a *new* UIView every access breaks
+    /// reloadInputViews and can prevent the keyboard from appearing.
+    private lazy var emptyInputView: UIView = {
         let v = UIView(frame: .zero)
         v.backgroundColor = .clear
+        v.isUserInteractionEnabled = false
         return v
+    }()
+
+    /// `nil` → system software keyboard. Non-nil empty view → HW-only (no soft KB).
+    override var inputView: UIView? {
+        softKeyboardOn ? nil : emptyInputView
+    }
+
+    /// Prefer software keyboard when available (iPad may still hide it if a
+    /// hardware keyboard is connected — system policy).
+    override var inputAssistantItem: UITextInputAssistantItem {
+        let item = super.inputAssistantItem
+        item.leadingBarButtonGroups = []
+        item.trailingBarButtonGroups = []
+        return item
     }
 
     func setSoftKeyboard(_ on: Bool) {
+        // Idempotent: updateUIView runs on every @Published tick (cursor, FPS, …).
+        // Never call reloadInputViews on the hot path — it can dismiss/recreate the KB.
         if on == softKeyboardOn {
-            if on { presentSoftKeyboard() }
+            if on, !isFirstResponder {
+                ensureSoftKeyboardVisible()
+            }
             return
         }
         softKeyboardOn = on
         if on {
+            SoftKeyboardHost.shared.hide(notify: false) // drop any legacy host FR
             presentSoftKeyboard()
         } else {
             dismissSoftKeyboard()
@@ -381,27 +484,24 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
     }
 
     private func presentSoftKeyboard() {
-        // Drop metal first-responder so the text field can take keyboard focus.
-        if isFirstResponder {
-            resignFirstResponder()
-        }
-        // Attach a 1×1 off-screen field to the session host (same key window).
-        // No secondary UIWindow: making a secondary window key blocked sidebar
-        // taps; restoring main as key after FR dismissed the keyboard.
-        // Layout push is prevented by RemoteSessionHostController.
+        // Drop metal / local field FR so SoftKeyboardHost can own the key window.
+        if isFirstResponder { resignFirstResponder() }
+        if softField.isFirstResponder { softField.resignFirstResponder() }
+
         let host = SoftKeyboardHost.shared
         host.onInsert = { [weak self] text in
-            if text == "\n" {
-                // Enter as USB HID 0x28
-                self?.session?.handleKey(character: "\n", usbHid: 0x28, down: true)
-                self?.session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+            guard let self, self.softKeyboardOn else { return }
+            if text == "\n" || text == "\r" {
+                self.session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+                self.session?.handleKey(character: "\n", usbHid: 0x28, down: false)
             } else {
-                self?.session?.inputString(text)
+                self.session?.inputString(text)
             }
         }
         host.onDelete = { [weak self] in
-            self?.session?.handleKey(character: "", usbHid: 0x2A, down: true)
-            self?.session?.handleKey(character: "", usbHid: 0x2A, down: false)
+            guard let self, self.softKeyboardOn else { return }
+            self.session?.handleKey(character: "", usbHid: 0x2A, down: true)
+            self.session?.handleKey(character: "", usbHid: 0x2A, down: false)
         }
         host.onHide = { [weak self] in
             guard let self else { return }
@@ -409,22 +509,84 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
             self.session?.softKeyboardVisible = false
             self.claimHardwareFocus()
         }
-        // Delay past the toolbar button's touch sequence.
+
+        // Defer past the sidebar button touch-up.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.softKeyboardOn else { return }
+            // Primary: pass-through key window (proven to raise system keyboard).
             host.show(attachedTo: self)
+            // Secondary insurance after a beat: local field / UIKeyInput if host failed.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                self?.ensureSoftKeyboardVisibleLocalFallback()
+            }
+        }
+    }
+
+    /// Only used if SoftKeyboardHost did not become first responder.
+    private func ensureSoftKeyboardVisibleLocalFallback() {
+        guard softKeyboardOn else { return }
+        // Host already owns FR → done.
+        if SoftKeyboardHost.shared.isShowing {
+            // Can't see host field FR from here easily; if keyboard still missing
+            // try local path only when metal/window still key without host.
+            // SoftKeyboardHost keeps its window key while showing — if our window
+            // is still key, host likely failed.
+            if window?.isKeyWindow == true {
+                // Host window should be key; if session window is key, host failed.
+                activateLocalSoftField()
+            }
+            return
+        }
+        activateLocalSoftField()
+    }
+
+    private func activateLocalSoftField() {
+        guard softKeyboardOn else { return }
+        window?.makeKey()
+        if softField.superview !== self {
+            softField.frame = CGRect(x: -2, y: -2, width: 1, height: 1)
+            clipsToBounds = false
+            addSubview(softField)
+            sendSubviewToBack(softField)
+        }
+        softField.text = SoftKeyboardField.sentinel
+        if isFirstResponder { resignFirstResponder() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.softKeyboardOn else { return }
+            if !self.softField.becomeFirstResponder() {
+                _ = self.becomeFirstResponder()
+                self.reloadInputViews()
+            }
+        }
+    }
+
+    private func ensureSoftKeyboardVisible() {
+        // Called from setSoftKeyboard idempotent path when FR was lost.
+        guard softKeyboardOn else { return }
+        if !SoftKeyboardHost.shared.isShowing {
+            SoftKeyboardHost.shared.show(attachedTo: self)
         }
     }
 
     private func dismissSoftKeyboard() {
         SoftKeyboardHost.shared.hide(notify: false)
-        claimHardwareFocus()
+        if softField.isFirstResponder {
+            softField.resignFirstResponder()
+        }
+        // Stay first responder for HW keys; empty inputView hides the soft keyboard.
+        if isFirstResponder {
+            reloadInputViews()
+        } else {
+            claimHardwareFocus()
+        }
     }
 
     private func claimHardwareFocus() {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.softKeyboardOn else { return }
+            self.window?.makeKey()
             _ = self.becomeFirstResponder()
+            self.reloadInputViews()
         }
     }
 
@@ -438,15 +600,42 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil, !softKeyboardOn {
-            claimHardwareFocus()
+        if window != nil {
+            if softKeyboardOn {
+                ensureSoftKeyboardVisible()
+            } else {
+                claimHardwareFocus()
+            }
         }
+    }
+
+    // MARK: UIKeyInput (soft keyboard → remote)
+
+    var hasText: Bool { true }
+
+    func insertText(_ text: String) {
+        // Only accept insertText while soft keyboard mode is on.
+        // HW keys while soft-off are handled by pressesBegan (avoids double-fire).
+        guard softKeyboardOn else { return }
+        if text == "\n" || text == "\r" {
+            session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+            session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+        } else {
+            session?.inputString(text)
+        }
+    }
+
+    func deleteBackward() {
+        guard softKeyboardOn else { return }
+        session?.handleKey(character: "", usbHid: 0x2A, down: true)
+        session?.handleKey(character: "", usbHid: 0x2A, down: false)
     }
 
     // MARK: Hardware key presses
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Soft keyboard owns text input via SoftKeyboardHost; skip HW press remap.
+        // Soft keyboard / UIKeyInput owns character entry; still forward presses
+        // for non-character keys when not capturing via insertText.
         if softKeyboardOn {
             super.pressesBegan(presses, with: event)
             return
@@ -830,6 +1019,13 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
         true
     }
 
+    /// Never let the 1×1 soft-keyboard field steal canvas hits.
+    override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+        let hit = super.hitTest(point, with: event)
+        if hit === softField { return self }
+        return hit
+    }
+
     // MARK: Touches (single-finger mouse only; pan/zoom via gesture recognizers)
     //
     // Sidecar-style touch mode (absolute):
@@ -845,7 +1041,8 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
     //   • Two-finger double-tap → reset zoom
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if !softKeyboardOn {
+        // Do not steal FR from the soft-keyboard text field.
+        if !softKeyboardOn, !softField.isFirstResponder {
             _ = becomeFirstResponder()
         }
         for t in touches {
@@ -1082,5 +1279,40 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate {
               let json = String(data: data, encoding: .utf8)
         else { return }
         session?.sendMouseJSON(json)
+    }
+}
+
+// MARK: - Soft-keyboard text field (child of TouchMetalView)
+
+/// Tiny field that owns system-keyboard FR. Lives as a subview of the metal
+/// view so SwiftUI cannot strip it and it never covers the sidebar.
+final class SoftKeyboardField: UITextField, UITextFieldDelegate {
+    static let sentinel = "\u{200B}"
+
+    var onInsert: ((String) -> Void)?
+    var onDelete: (() -> Void)?
+
+    override var canBecomeFirstResponder: Bool { isEnabled }
+
+    func textField(
+        _ textField: UITextField,
+        shouldChangeCharactersIn range: NSRange,
+        replacementString string: String
+    ) -> Bool {
+        if string.isEmpty {
+            onDelete?()
+        } else if string == "\n" {
+            onInsert?("\n")
+        } else {
+            onInsert?(string)
+        }
+        textField.text = Self.sentinel
+        return false
+    }
+
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        onInsert?("\n")
+        textField.text = Self.sentinel
+        return false
     }
 }
