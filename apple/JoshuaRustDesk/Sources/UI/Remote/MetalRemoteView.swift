@@ -113,6 +113,9 @@ struct MetalRemoteView: UIViewRepresentable {
             if let (data, w, h) = session.pullFrame(), w > 0, h > 0 {
                 upload(data: data, width: w, height: h)
             }
+            if let tv = view as? TouchMetalView {
+                tv.updateCursorOverlay()
+            }
             guard let drawable = view.currentDrawable,
                   let rpd = view.currentRenderPassDescriptor,
                   let pipeline,
@@ -210,6 +213,10 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     private let softSentinel = "\u{200B}" // zero-width space
     private var keyboardObservers: [NSObjectProtocol] = []
 
+    /// Remote peer cursor overlay (image from cursor_data / fallback arrow).
+    private let cursorView = UIImageView()
+    private var defaultCursorImage: UIImage?
+
     /// Suppresses HW presses path while soft field is editing (text field handles it).
     private var softKeyboardOnPublic: Bool { softKeyboardOn }
 
@@ -228,12 +235,14 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     override init(frame frameRect: CGRect, device: MTLDevice?) {
         super.init(frame: frameRect, device: device)
         setupSoftField()
+        setupCursorOverlay()
         setupKeyboardNotifications()
     }
 
     required init(coder: NSCoder) {
         super.init(coder: coder)
         setupSoftField()
+        setupCursorOverlay()
         setupKeyboardNotifications()
     }
 
@@ -268,6 +277,78 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             softField.leadingAnchor.constraint(equalTo: leadingAnchor),
             softField.topAnchor.constraint(equalTo: topAnchor),
         ])
+    }
+
+    private func setupCursorOverlay() {
+        cursorView.contentMode = .scaleAspectFit
+        cursorView.isUserInteractionEnabled = false
+        cursorView.isHidden = true
+        cursorView.layer.zPosition = 1000
+        cursorView.layer.shadowColor = UIColor.black.cgColor
+        cursorView.layer.shadowOpacity = 0.55
+        cursorView.layer.shadowRadius = 1.2
+        cursorView.layer.shadowOffset = CGSize(width: 0.5, height: 0.5)
+        addSubview(cursorView)
+        // Built-in arrow so something is visible before cursor_data arrives.
+        let cfg = UIImage.SymbolConfiguration(pointSize: 22, weight: .semibold)
+        defaultCursorImage = UIImage(systemName: "cursorarrow", withConfiguration: cfg)?
+            .withTintColor(.white, renderingMode: .alwaysOriginal)
+        cursorView.image = defaultCursorImage
+    }
+
+    /// Map remote display coords → view points (letterbox + pan/zoom).
+    func mapFromRemote(x: CGFloat, y: CGFloat) -> CGPoint {
+        let r = contentRect()
+        let dw = CGFloat(max(1, session?.displayWidth ?? 1))
+        let dh = CGFloat(max(1, session?.displayHeight ?? 1))
+        return CGPoint(
+            x: r.minX + (x / dw) * r.width,
+            y: r.minY + (y / dh) * r.height
+        )
+    }
+
+    /// Called each frame from the Metal draw loop.
+    func updateCursorOverlay() {
+        guard let session else {
+            cursorView.isHidden = true
+            return
+        }
+        let show = session.showRemoteCursor && session.cursorVisible && !session.cursorEmbedded
+        guard show else {
+            cursorView.isHidden = true
+            return
+        }
+
+        let img = session.cursorImage ?? defaultCursorImage
+        if cursorView.image !== img {
+            cursorView.image = img
+        }
+        guard let img else {
+            cursorView.isHidden = true
+            return
+        }
+
+        // Scale cursor with content fit so it matches remote pixel size on screen.
+        let r = contentRect()
+        let dw = CGFloat(max(1, session.displayWidth))
+        let scale = r.width / dw
+        let hotX = session.cursorImage != nil ? session.cursorHotX : 0
+        let hotY = session.cursorImage != nil ? session.cursorHotY : 0
+        let iw = max(1, img.size.width)
+        let ih = max(1, img.size.height)
+        // Minimum ~12pt so tiny cursors stay visible on high-DPI.
+        let drawScale = max(scale, 12 / max(iw, ih))
+        let w = iw * drawScale
+        let h = ih * drawScale
+        let pt = mapFromRemote(x: session.cursorX, y: session.cursorY)
+        cursorView.frame = CGRect(
+            x: pt.x - hotX * drawScale,
+            y: pt.y - hotY * drawScale,
+            width: w,
+            height: h
+        )
+        cursorView.isHidden = false
+        bringSubviewToFront(cursorView)
     }
 
     private func setupKeyboardNotifications() {

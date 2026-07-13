@@ -28,12 +28,23 @@ final class SessionController: ObservableObject {
     @Published var qualityLabel: String = "Balanced"
     @Published var viewOnly: Bool = false
     @Published var showRemoteCursor: Bool = true
+    /// Remote peer cursor (display coords) + image for overlay.
+    @Published private(set) var cursorX: CGFloat = 0
+    @Published private(set) var cursorY: CGFloat = 0
+    @Published private(set) var cursorHotX: CGFloat = 0
+    @Published private(set) var cursorHotY: CGFloat = 0
+    @Published private(set) var cursorImage: UIImage?
+    @Published private(set) var cursorVisible: Bool = false
+    /// When peer embeds cursor in the video stream, hide our overlay.
+    @Published private(set) var cursorEmbedded: Bool = false
 
     private(set) var sessionUUID: String = ""
     private var active = false
     private var lastPassword: String = ""
     private var lastForceRelay = false
     private var rememberPassword = false
+    private var cursorCache: [String: (image: UIImage, hotx: CGFloat, hoty: CGFloat)] = [:]
+    private var currentCursorId: String = ""
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
@@ -53,6 +64,7 @@ final class SessionController: ObservableObject {
         statusText = "Connecting to \(peerId)…"
         softKeyboardVisible = false
         viewOnly = false
+        resetCursorState()
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
         RecentPeersStore.shared.record(
@@ -126,6 +138,17 @@ final class SessionController: ObservableObject {
     func sendMouseJSON(_ json: String) {
         guard active, !viewOnly else { return }
         rd_session_send_mouse(sessionUUID, json)
+        // Optimistic local cursor so the pointer tracks the finger immediately.
+        if let data = json.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let x = intValue(obj["x"]), let y = intValue(obj["y"]) {
+                cursorX = CGFloat(x)
+                cursorY = CGFloat(y)
+                if showRemoteCursor && !cursorEmbedded {
+                    cursorVisible = true
+                }
+            }
+        }
     }
 
     func setViewSize(width: Int, height: Int) {
@@ -207,12 +230,16 @@ final class SessionController: ObservableObject {
         rd_session_toggle_option(sessionUUID, "show-remote-cursor")
         showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
         statusText = showRemoteCursor ? "Remote cursor on" : "Remote cursor off"
+        if !showRemoteCursor {
+            cursorVisible = false
+        }
     }
 
     func refreshToggleState() {
         guard active else { return }
         viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
-        showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+        // Peer only streams cursor position/shape when this option is on (or view-only).
+        ensureShowRemoteCursor()
         if let p = rd_session_get_image_quality(sessionUUID) {
             let q = String(cString: p)
             rd_free_string(p)
@@ -220,6 +247,27 @@ final class SessionController: ObservableObject {
                 qualityLabel = q.capitalized
             }
         }
+    }
+
+    /// Turn on show-remote-cursor so the peer sends CursorData / CursorPosition.
+    private func ensureShowRemoteCursor() {
+        let on = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+        if !on {
+            rd_session_toggle_option(sessionUUID, "show-remote-cursor")
+        }
+        showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+    }
+
+    private func resetCursorState() {
+        cursorCache.removeAll()
+        currentCursorId = ""
+        cursorImage = nil
+        cursorX = 0
+        cursorY = 0
+        cursorHotX = 0
+        cursorHotY = 0
+        cursorVisible = false
+        cursorEmbedded = false
     }
 
     // MARK: - Frame pull
@@ -318,13 +366,120 @@ final class SessionController: ObservableObject {
             phase = .connected
             statusText = "Connected"
             refreshToggleState()
-        case "cursor_data", "cursor_id", "cursor_position", "permission", "clipboard":
+        case "cursor_data":
+            handleCursorData(obj)
+        case "cursor_id":
+            handleCursorId(obj)
+        case "cursor_position":
+            handleCursorPosition(obj)
+        case "switch_display":
+            if let emb = obj["cursor_embedded"] {
+                cursorEmbedded = stringValue(emb) == "1" || (emb as? Bool) == true
+            }
+            if let w = intValue(obj["width"]), w > 0 { displayWidth = w }
+            if let h = intValue(obj["height"]), h > 0 { displayHeight = h }
+        case "permission", "clipboard":
             break
         default:
             if phase == .connecting {
                 statusText = name.isEmpty ? raw : name
             }
         }
+    }
+
+    // MARK: - Cursor events
+
+    private func handleCursorData(_ obj: [String: Any]) {
+        let id = stringValue(obj["id"]) ?? ""
+        let hotx = CGFloat(doubleValue(obj["hotx"]) ?? 0)
+        let hoty = CGFloat(doubleValue(obj["hoty"]) ?? 0)
+        let width = intValue(obj["width"]) ?? 0
+        let height = intValue(obj["height"]) ?? 0
+        guard width > 0, height > 0 else { return }
+
+        // colors is a JSON-encoded array of bytes (RGBA), itself a string field.
+        var bytes: [UInt8] = []
+        if let colorsStr = obj["colors"] as? String,
+           let cdata = colorsStr.data(using: .utf8),
+           let arr = try? JSONSerialization.jsonObject(with: cdata) as? [Any] {
+            bytes = arr.compactMap { v -> UInt8? in
+                if let i = v as? Int { return UInt8(clamping: i) }
+                if let n = v as? NSNumber { return UInt8(clamping: n.intValue) }
+                return nil
+            }
+        } else if let arr = obj["colors"] as? [Any] {
+            bytes = arr.compactMap { v -> UInt8? in
+                if let i = v as? Int { return UInt8(clamping: i) }
+                if let n = v as? NSNumber { return UInt8(clamping: n.intValue) }
+                return nil
+            }
+        }
+        guard let image = Self.makeRGBAImage(width: width, height: height, bytes: bytes) else { return }
+        if !id.isEmpty {
+            cursorCache[id] = (image, hotx, hoty)
+            currentCursorId = id
+        }
+        cursorImage = image
+        cursorHotX = hotx
+        cursorHotY = hoty
+    }
+
+    private func handleCursorId(_ obj: [String: Any]) {
+        guard let id = stringValue(obj["id"]), !id.isEmpty else { return }
+        currentCursorId = id
+        if let cached = cursorCache[id] {
+            cursorImage = cached.image
+            cursorHotX = cached.hotx
+            cursorHotY = cached.hoty
+        }
+    }
+
+    private func handleCursorPosition(_ obj: [String: Any]) {
+        let x = doubleValue(obj["x"]) ?? 0
+        let y = doubleValue(obj["y"]) ?? 0
+        cursorX = CGFloat(x)
+        cursorY = CGFloat(y)
+        cursorVisible = showRemoteCursor && !cursorEmbedded
+    }
+
+    private static func makeRGBAImage(width: Int, height: Int, bytes: [UInt8]) -> UIImage? {
+        let expected = width * height * 4
+        guard bytes.count >= expected, width > 0, height > 0 else { return nil }
+        var rgba = Array(bytes.prefix(expected))
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue)
+        guard let ctx = CGContext(
+            data: &rgba,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ), let cg = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
+    private func stringValue(_ v: Any?) -> String? {
+        if let s = v as? String { return s }
+        if let n = v as? NSNumber { return n.stringValue }
+        if let i = v as? Int { return String(i) }
+        return nil
+    }
+
+    private func intValue(_ v: Any?) -> Int? {
+        if let i = v as? Int { return i }
+        if let n = v as? NSNumber { return n.intValue }
+        if let s = v as? String { return Int(s) }
+        return nil
+    }
+
+    private func doubleValue(_ v: Any?) -> Double? {
+        if let d = v as? Double { return d }
+        if let i = v as? Int { return Double(i) }
+        if let n = v as? NSNumber { return n.doubleValue }
+        if let s = v as? String { return Double(s) }
+        return nil
     }
 }
 
