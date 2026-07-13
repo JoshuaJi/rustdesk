@@ -211,7 +211,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     private var keyboardObservers: [NSObjectProtocol] = []
     /// System long-press (fires in tracking mode — Timer on .default does not).
     private var longPressGesture: UILongPressGestureRecognizer?
-    private var twoFingerRightTap: UITapGestureRecognizer?
     /// Fallback text field (subview of *this* view — never a secondary window /
     /// never a UIHostingController sibling that SwiftUI may strip).
     private lazy var softField: SoftKeyboardField = {
@@ -275,6 +274,19 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     private var viewportGestureMoved = false
     /// Prefer scroll vs pinch when two fingers move mostly in parallel.
     private var twoFingerPanIsScroll = false
+
+    // Manual two-finger tap (right-click) — UITapGestureRecognizer loses to pan/pinch.
+    private var multiPeakTouches = 0
+    private var multiStartTime: CFTimeInterval = 0
+    private var multiStartCentroid: CGPoint = .zero
+    private var multiStartPoints: [ObjectIdentifier: CGPoint] = [:]
+    private var multiMaxTravel: CGFloat = 0
+    private var pendingTwoFingerAction: DispatchWorkItem?
+    private var lastTwoFingerTapTime: CFTimeInterval = 0
+    private var lastTwoFingerTapPoint: CGPoint = .zero
+    private let twoFingerTapMaxTravel: CGFloat = 28
+    private let twoFingerTapMaxDuration: CFTimeInterval = 0.45
+    private let twoFingerDoubleTapInterval: CFTimeInterval = 0.35
 
     // Shared single-finger tracking
     private var fingerStart: CGPoint?
@@ -795,36 +807,23 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     }
 
     // MARK: Viewport gestures (pinch + two-finger pan)
+    //
+    // Two-finger **tap** (right-click) is detected manually in touches* — a
+    // UITapGestureRecognizer consistently loses to UIPan/UIPinch.
 
     private func setupViewportGestures() {
         let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
         pinch.delegate = self
+        // Keep touch delivery so manual two-finger tap detection still sees lift.
+        pinch.cancelsTouchesInView = false
         addGestureRecognizer(pinch)
 
         let pan = UIPanGestureRecognizer(target: self, action: #selector(handleTwoFingerPan(_:)))
         pan.minimumNumberOfTouches = 2
         pan.maximumNumberOfTouches = 2
         pan.delegate = self
+        pan.cancelsTouchesInView = false
         addGestureRecognizer(pan)
-
-        // Two-finger double-tap → reset zoom (Photos/Maps style).
-        let resetTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerDoubleTap(_:)))
-        resetTap.numberOfTapsRequired = 2
-        resetTap.numberOfTouchesRequired = 2
-        resetTap.delegate = self
-        addGestureRecognizer(resetTap)
-
-        // Two-finger single tap → right-click (waits for double-tap reset to fail).
-        let rightTap = UITapGestureRecognizer(target: self, action: #selector(handleTwoFingerRightClick(_:)))
-        rightTap.numberOfTapsRequired = 1
-        rightTap.numberOfTouchesRequired = 2
-        rightTap.delegate = self
-        rightTap.require(toFail: resetTap)
-        // Do NOT make pan require(toFail: rightTap) — that delays every scroll by the
-        // double-tap timeout. Pan only begins after movement; a still two-finger
-        // tap is recognized as right-click via shouldRecognizeSimultaneously=false.
-        addGestureRecognizer(rightTap)
-        twoFingerRightTap = rightTap
 
         // Single-finger long-press → right-click (UIKit, not Timer — timers on
         // .default mode never fire while a finger is down / tracking mode).
@@ -836,6 +835,93 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         lp.delegate = self
         addGestureRecognizer(lp)
         longPressGesture = lp
+    }
+
+    private func multiTouchCentroid() -> CGPoint {
+        guard !activeTouches.isEmpty else { return .zero }
+        var sx: CGFloat = 0, sy: CGFloat = 0
+        for p in activeTouches.values {
+            sx += p.x
+            sy += p.y
+        }
+        let n = CGFloat(activeTouches.count)
+        return CGPoint(x: sx / n, y: sy / n)
+    }
+
+    private func beginMultiTouchTrackingIfNeeded() {
+        guard activeTouches.count >= 2 else { return }
+        if multiPeakTouches < 2 {
+            // First time we reach 2 fingers this gesture.
+            multiStartTime = CACurrentMediaTime()
+            multiStartCentroid = multiTouchCentroid()
+            multiStartPoints.removeAll(keepingCapacity: true)
+            for (t, p) in activeTouches {
+                multiStartPoints[ObjectIdentifier(t)] = p
+            }
+            multiMaxTravel = 0
+            pendingTwoFingerAction?.cancel()
+            pendingTwoFingerAction = nil
+        }
+        multiPeakTouches = max(multiPeakTouches, activeTouches.count)
+        updateMultiTouchTravel()
+    }
+
+    private func updateMultiTouchTravel() {
+        guard multiPeakTouches >= 2, !multiStartPoints.isEmpty else { return }
+        var maxT: CGFloat = multiMaxTravel
+        for (t, p) in activeTouches {
+            if let s = multiStartPoints[ObjectIdentifier(t)] {
+                maxT = max(maxT, hypot(p.x - s.x, p.y - s.y))
+            }
+        }
+        // Also centroid drift (covers parallel finger slide).
+        let c = multiTouchCentroid()
+        maxT = max(maxT, hypot(c.x - multiStartCentroid.x, c.y - multiStartCentroid.y))
+        multiMaxTravel = maxT
+    }
+
+    /// Called when the last finger of a multi-touch sequence lifts.
+    private func endMultiTouchSequence() {
+        defer {
+            multiPeakTouches = 0
+            multiStartPoints.removeAll(keepingCapacity: true)
+            multiMaxTravel = 0
+        }
+        guard multiPeakTouches == 2 else { return }
+
+        // Only reject on real finger travel — pan GR often reports noise > 0.5pt.
+        if multiMaxTravel > twoFingerTapMaxTravel {
+            pendingTwoFingerAction?.cancel()
+            pendingTwoFingerAction = nil
+            return
+        }
+        let duration = CACurrentMediaTime() - multiStartTime
+        guard duration > 0.02, duration <= twoFingerTapMaxDuration else { return }
+
+        let point = multiStartCentroid
+        let now = CACurrentMediaTime()
+        // Two-finger double-tap → reset zoom (replaces UITap double recognizer).
+        if now - lastTwoFingerTapTime < twoFingerDoubleTapInterval,
+           hypot(point.x - lastTwoFingerTapPoint.x, point.y - lastTwoFingerTapPoint.y) < 48 {
+            pendingTwoFingerAction?.cancel()
+            pendingTwoFingerAction = nil
+            lastTwoFingerTapTime = 0
+            resetViewport()
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            return
+        }
+
+        lastTwoFingerTapTime = now
+        lastTwoFingerTapPoint = point
+        // Delay single two-finger tap so a quick second tap can become double-tap reset.
+        pendingTwoFingerAction?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.pendingTwoFingerAction = nil
+            self.performRightClick(at: point)
+        }
+        pendingTwoFingerAction = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + twoFingerDoubleTapInterval, execute: work)
     }
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
@@ -853,6 +939,8 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
                 if abs(g.scale - 1) < pinchCommitThreshold { return }
                 pinchCommitted = true
                 viewportGestureMoved = true
+                pendingTwoFingerAction?.cancel()
+                pendingTwoFingerAction = nil
                 // Re-base so committing doesn't jump zoom.
                 pinchBaseZoom = userZoom / max(g.scale, 0.01)
             }
@@ -860,6 +948,12 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         case .ended, .cancelled, .failed:
             viewportGestureActive = false
             pinchCommitted = false
+            if userZoom < 1.05, viewportGestureMoved {
+                // Only snap-reset if we actually zoomed (not a two-finger tap).
+                if userZoom < 1.05 {
+                    // leave at userZoom; tiny zooms already reset below
+                }
+            }
             if userZoom < 1.05 {
                 resetViewport()
             }
@@ -872,7 +966,9 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         switch g.state {
         case .began:
             viewportGestureActive = true
-            viewportGestureMoved = false
+            // Do not clear viewportGestureMoved here if a previous gesture set it —
+            // but each pan sequence starts fresh:
+            // Note: multi-touch travel is tracked separately for tap detection.
             twoFingerPanIsScroll = userZoom <= 1.02
             wheelAccumulator = 0
             releaseAllButtons(at: nil)
@@ -885,7 +981,15 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
             let t = g.translation(in: self)
             g.setTranslation(.zero, in: self)
             let dist = hypot(t.x, t.y)
-            if dist > 0.5 { viewportGestureMoved = true }
+            // Ignore sub-threshold noise so a two-finger *tap* is not classified as scroll.
+            if dist > 10 {
+                viewportGestureMoved = true
+                pendingTwoFingerAction?.cancel()
+                pendingTwoFingerAction = nil
+            } else if !viewportGestureMoved {
+                // Still within tap slack — don't scroll yet.
+                return
+            }
 
             if userZoom > 1.02 && !twoFingerPanIsScroll {
                 // Pan the zoomed viewport (content follows fingers).
@@ -894,13 +998,11 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
                 clampPan()
             } else {
                 // Fit view (or scroll-locked): two-finger drag = remote scroll.
-                // Flutter mobile uses discrete wheel ±1 (Windows multiplies by WHEEL_DELTA=120).
-                // Sending ±100 was wrong and produced huge jumps / no usable scroll.
                 applyTwoFingerScroll(translation: t, at: g.location(in: self))
             }
         case .ended, .cancelled, .failed:
             // Small fling: one extra notch if there was residual motion.
-            if twoFingerPanIsScroll || userZoom <= 1.02 {
+            if viewportGestureMoved, twoFingerPanIsScroll || userZoom <= 1.02 {
                 let v = g.velocity(in: self)
                 if abs(v.y) > 400 {
                     let notches = min(6, max(1, Int(abs(v.y) / 900)))
@@ -914,6 +1016,8 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
             viewportGestureActive = false
             wheelAccumulator = 0
             twoFingerPanIsScroll = false
+            // Reset moved flag after a short beat so a clean two-finger tap can follow.
+            // Keep true until multi-touch sequence ends so endMultiTouchSequence sees it.
         default:
             break
         }
@@ -964,18 +1068,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         ])
     }
 
-    @objc private func handleTwoFingerDoubleTap(_ g: UITapGestureRecognizer) {
-        guard g.state == .ended else { return }
-        resetViewport()
-    }
-
-    @objc private func handleTwoFingerRightClick(_ g: UITapGestureRecognizer) {
-        guard g.state == .ended else { return }
-        // Don't right-click if a pinch/pan just moved the viewport.
-        guard !viewportGestureMoved else { return }
-        performRightClick(at: g.location(in: self))
-    }
-
     @objc private func handleLongPressGesture(_ g: UILongPressGestureRecognizer) {
         guard g.state == .began else { return }
         // Multi-touch / viewport own the gesture.
@@ -1011,8 +1103,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         let b = otherGestureRecognizer
         if a is UIPinchGestureRecognizer || b is UIPinchGestureRecognizer { return true }
         if a is UIPanGestureRecognizer, b is UIPanGestureRecognizer { return true }
-        // Do not let pan/pinch run together with taps / long-press (kills right-click).
-        if a is UITapGestureRecognizer || b is UITapGestureRecognizer { return false }
         if a is UILongPressGestureRecognizer || b is UILongPressGestureRecognizer { return false }
         return true
     }
@@ -1021,7 +1111,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         _ gestureRecognizer: UIGestureRecognizer,
         shouldReceive touch: UITouch
     ) -> Bool {
-        // Viewport gestures only care about multi-touch; single-finger stays on touches*.
         true
     }
 
@@ -1041,7 +1130,7 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     //   • Long-press → right-click (UILongPressGestureRecognizer)
     // Cursor mode (trackpad):
     //   • Drag moves remote cursor; tap = left-click; long-press = right-click
-    //   • Two-finger tap = right-click
+    //   • Two-finger tap = right-click (manual detector)
     // Viewport (both modes):
     //   • Pinch → zoom about fingers
     //   • Two-finger drag @ 1× → scroll wheel; when zoomed → pan view
@@ -1055,11 +1144,17 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
+        beginMultiTouchTrackingIfNeeded()
 
-        // Multi-touch: viewport gestures own it — cancel single-finger mouse work.
+        // Multi-touch: viewport gestures own single-finger mouse work.
         if activeTouches.count >= 2 || viewportGestureActive {
             releaseAllButtons(at: touches.first.map { $0.location(in: self) })
-            resetFingerState()
+            // Keep multiPeakTouches / multiStart* for tap detection.
+            fingerStart = nil
+            lastFinger = nil
+            fingerMoved = false
+            touchModeDragging = false
+            leftHeldInCursorMode = false
             return
         }
 
@@ -1085,8 +1180,15 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        // Never drive mouse with multi-finger or during viewport gestures.
-        if activeTouches.count >= 2 || viewportGestureActive {
+        if activeTouches.count >= 2 {
+            beginMultiTouchTrackingIfNeeded()
+            updateMultiTouchTravel()
+            releaseAllButtons(at: nil)
+            fingerStart = nil
+            lastFinger = nil
+            return
+        }
+        if viewportGestureActive {
             releaseAllButtons(at: nil)
             resetFingerState()
             return
@@ -1127,8 +1229,22 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         let endPoint = touches.first.map { $0.location(in: self) } ?? lastFinger
         for t in touches { activeTouches.removeValue(forKey: t) }
 
-        // Still multi or viewport gesture — mouse end handled elsewhere.
-        if activeTouches.count >= 1 || viewportGestureActive {
+        // Multi-touch sequence finished → maybe two-finger tap.
+        if activeTouches.isEmpty, multiPeakTouches >= 2 {
+            endMultiTouchSequence()
+            releaseAllButtons(at: endPoint)
+            viewportGestureMoved = false
+            resetFingerState()
+            return
+        }
+
+        // Still multi (one finger of two lifted) — wait for the rest.
+        if activeTouches.count >= 1, multiPeakTouches >= 2 {
+            updateMultiTouchTravel()
+            return
+        }
+
+        if viewportGestureActive {
             if activeTouches.isEmpty {
                 releaseAllButtons(at: endPoint)
                 resetFingerState()
@@ -1177,6 +1293,13 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         let endPoint = touches.first.map { $0.location(in: self) }
         for t in touches { activeTouches.removeValue(forKey: t) }
+        // Still evaluate two-finger tap on cancel (pan/pinch may cancel touches).
+        if activeTouches.isEmpty, multiPeakTouches >= 2 {
+            endMultiTouchSequence()
+        } else if activeTouches.isEmpty {
+            multiPeakTouches = 0
+            multiStartPoints.removeAll()
+        }
         // Long-press sets gestureConsumed before cancelling touches — keep it.
         let kept = gestureConsumed
         releaseAllButtons(at: endPoint)
