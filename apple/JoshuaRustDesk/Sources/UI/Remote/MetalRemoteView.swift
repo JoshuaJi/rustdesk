@@ -230,6 +230,19 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
     private var pinchStartDistance: CGFloat = 0
     private var wheelAccumulator: CGFloat = 0
 
+    // Cursor-mode (trackpad) single-finger state
+    private var fingerStart: CGPoint?
+    private var lastFinger: CGPoint?
+    private var fingerMoved = false
+    private var leftHeldInCursorMode = false
+    private var longPressTimer: Timer?
+    private let dragThreshold: CGFloat = 10
+    /// How much finger motion moves the remote cursor (trackpad feel).
+    private let cursorSensitivity: CGFloat = 1.15
+
+    /// Remote-cursor ON → cursor/trackpad mode; OFF → absolute touch mode.
+    private var isCursorMode: Bool { session?.showRemoteCursor == true }
+
     // MARK: Setup
 
     override init(frame frameRect: CGRect, device: MTLDevice?) {
@@ -644,24 +657,41 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         let fingerCount = activeTouches.count
 
         if fingerCount >= 2 {
+            cancelLongPress()
+            // Right-click if second finger lands without much prior drag (cursor mode).
+            if isCursorMode, !fingerMoved, !leftHeldInCursorMode {
+                session?.clickAtCursor(button: "right")
+            }
             isPinching = false
             isTwoFingerPanning = true
             lastTwoFingerMid = midpoint(of: Set(activeTouches.keys))
             pinchStartZoom = userZoom
             panStartOffset = panOffset
             pinchStartDistance = 0
-            // End any pending left-button drag
-            if let p = touches.first.map({ $0.location(in: self) }) {
+            if !isCursorMode, let p = touches.first.map({ $0.location(in: self) }) {
                 sendMouse(type: "up", point: p, buttons: "left")
+            } else if leftHeldInCursorMode {
+                session?.mouseButtonAtCursor(type: "up", button: "left")
+                leftHeldInCursorMode = false
             }
             return
         }
 
-        // Single finger: left-button down (restore simple reliable path).
         isPinching = false
         isTwoFingerPanning = false
-        if let t = touches.first {
-            sendMouse(type: "down", point: t.location(in: self), buttons: "left")
+        guard let t = touches.first else { return }
+        let p = t.location(in: self)
+
+        if isCursorMode {
+            // Trackpad-style: drag moves cursor; tap clicks; long-press holds left button.
+            fingerStart = p
+            lastFinger = p
+            fingerMoved = false
+            leftHeldInCursorMode = false
+            scheduleLongPress()
+        } else {
+            // Touch mode: finger position IS the remote pointer (absolute).
+            sendMouse(type: "down", point: p, buttons: "left")
         }
     }
 
@@ -673,14 +703,29 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             handleMultiTouch(Set(activeTouches.keys))
             return
         }
-        if let t = touches.first {
-            sendMouse(type: "move", point: t.location(in: self), buttons: "")
+        guard let t = touches.first else { return }
+        let p = t.location(in: self)
+
+        if isCursorMode {
+            guard let last = lastFinger, let start = fingerStart else { return }
+            let travel = hypot(p.x - start.x, p.y - start.y)
+            if travel > dragThreshold {
+                fingerMoved = true
+                cancelLongPress()
+            }
+            let dx = p.x - last.x
+            let dy = p.y - last.y
+            lastFinger = p
+            applyCursorModeDelta(dx: dx, dy: dy)
+        } else {
+            sendMouse(type: "move", point: p, buttons: "")
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         let wasMulti = isPinching || isTwoFingerPanning || activeTouches.count > 1
         for t in touches { activeTouches.removeValue(forKey: t) }
+        cancelLongPress()
 
         if wasMulti {
             if activeTouches.count < 2 {
@@ -690,16 +735,62 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
                 pinchStartDistance = 0
                 wheelAccumulator = 0
             }
+            fingerStart = nil
+            lastFinger = nil
             return
         }
 
-        if let t = touches.first {
+        if isCursorMode {
+            if leftHeldInCursorMode {
+                session?.mouseButtonAtCursor(type: "up", button: "left")
+                leftHeldInCursorMode = false
+            } else if !fingerMoved {
+                // Tap → left click at current cursor (not finger location).
+                session?.clickAtCursor(button: "left")
+            }
+            // Else: trackpad pan only — cursor already moved.
+            fingerStart = nil
+            lastFinger = nil
+            fingerMoved = false
+        } else if let t = touches.first {
             sendMouse(type: "up", point: t.location(in: self), buttons: "left")
         }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         touchesEnded(touches, with: event)
+    }
+
+    private func scheduleLongPress() {
+        cancelLongPress()
+        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
+            guard let self, self.isCursorMode, !self.fingerMoved else { return }
+            self.leftHeldInCursorMode = true
+            self.session?.mouseButtonAtCursor(type: "down", button: "left")
+            // Light haptic so user knows drag will hold the button.
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+    }
+
+    private func cancelLongPress() {
+        longPressTimer?.invalidate()
+        longPressTimer = nil
+    }
+
+    /// Convert finger delta (view points) → remote cursor delta and send move.
+    private func applyCursorModeDelta(dx: CGFloat, dy: CGFloat) {
+        guard let session else { return }
+        let scale = max(0.001, contentToRemoteScale())
+        let rdx = (dx / scale) * cursorSensitivity
+        let rdy = (dy / scale) * cursorSensitivity
+        session.moveCursorRemote(toX: session.cursorX + rdx, y: session.cursorY + rdy)
+    }
+
+    /// View points per remote pixel (content fit scale).
+    private func contentToRemoteScale() -> CGFloat {
+        let r = contentRect()
+        let dw = CGFloat(max(1, session?.displayWidth ?? 1))
+        return r.width / dw
     }
 
     private func handleMultiTouch(_ touches: Set<UITouch>) {

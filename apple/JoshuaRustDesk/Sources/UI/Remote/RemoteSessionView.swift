@@ -138,8 +138,8 @@ struct RemoteSessionView: View {
                 }
 
                 chipButton(
-                    icon: session.showRemoteCursor ? "cursorarrow.click.2" : "cursorarrow",
-                    label: "Cursor"
+                    icon: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.draw",
+                    label: session.showRemoteCursor ? "Cursor mode" : "Touch mode"
                 ) {
                     session.toggleRemoteCursor()
                 }

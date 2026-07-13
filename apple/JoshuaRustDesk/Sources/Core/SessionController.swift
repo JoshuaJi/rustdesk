@@ -237,22 +237,24 @@ final class SessionController: ObservableObject {
         statusText = viewOnly ? "View only" : "Control enabled"
     }
 
+    /// Cursor mode when remote cursor is on; touch mode when off.
+    var isCursorMode: Bool { showRemoteCursor }
+
     func toggleRemoteCursor() {
         guard active else { return }
         rd_session_toggle_option(sessionUUID, "show-remote-cursor")
-        showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
-        statusText = showRemoteCursor ? "Remote cursor on" : "Remote cursor off"
-        if !showRemoteCursor {
-            cursorVisible = false
-        }
+        applyCursorModeFromPeer()
+        statusText = showRemoteCursor
+            ? "Cursor mode — drag moves pointer, tap clicks"
+            : "Touch mode — finger is the pointer"
     }
 
     func refreshToggleState() {
         guard active else { return }
         // Prefer control mode: if peer config left view-only on, turn it off once.
         ensureControlMode()
-        // Peer only streams cursor position/shape when this option is on (or view-only).
-        ensureShowRemoteCursor()
+        // Sync mode from peer option (do not force either way).
+        applyCursorModeFromPeer()
         if let p = rd_session_get_image_quality(sessionUUID) {
             let q = String(cString: p)
             rd_free_string(p)
@@ -274,16 +276,72 @@ final class SessionController: ObservableObject {
         viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
     }
 
-    /// Turn on show-remote-cursor so the peer sends CursorData / CursorPosition.
-    private func ensureShowRemoteCursor() {
-        let on = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
-        if !on {
-            rd_session_toggle_option(sessionUUID, "show-remote-cursor")
-        }
+    /// `show-remote-cursor` ON → cursor/trackpad mode; OFF → absolute touch mode.
+    private func applyCursorModeFromPeer() {
         showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
-        // Local overlay is on even before the first peer cursor_position arrives.
         if showRemoteCursor && !cursorEmbedded {
             cursorVisible = true
+            // Center pointer if we never got a position yet.
+            if cursorX <= 0, cursorY <= 0, displayWidth > 0, displayHeight > 0 {
+                cursorX = CGFloat(displayWidth) / 2
+                cursorY = CGFloat(displayHeight) / 2
+            }
+        } else {
+            cursorVisible = false
+        }
+    }
+
+    /// Move logical cursor in remote coords and send a mouse-move (cursor mode).
+    func moveCursorRemote(toX x: CGFloat, y: CGFloat) {
+        let dw = max(1, displayWidth)
+        let dh = max(1, displayHeight)
+        let nx = min(CGFloat(dw - 1), max(0, x))
+        let ny = min(CGFloat(dh - 1), max(0, y))
+        cursorX = nx
+        cursorY = ny
+        if showRemoteCursor && !cursorEmbedded {
+            cursorVisible = true
+        }
+        guard active, !viewOnly else { return }
+        let map: [String: String] = [
+            "x": "\(Int(nx))",
+            "y": "\(Int(ny))",
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: map),
+           let json = String(data: data, encoding: .utf8) {
+            rd_session_send_mouse(sessionUUID, json)
+        }
+    }
+
+    /// Click at current remote cursor (cursor mode).
+    func clickAtCursor(button: String = "left") {
+        guard active, !viewOnly else { return }
+        let x = "\(Int(cursorX))"
+        let y = "\(Int(cursorY))"
+        for type in ["down", "up"] {
+            let map: [String: String] = [
+                "x": x, "y": y,
+                "type": type,
+                "buttons": button,
+            ]
+            if let data = try? JSONSerialization.data(withJSONObject: map),
+               let json = String(data: data, encoding: .utf8) {
+                rd_session_send_mouse(sessionUUID, json)
+            }
+        }
+    }
+
+    func mouseButtonAtCursor(type: String, button: String = "left") {
+        guard active, !viewOnly else { return }
+        let map: [String: String] = [
+            "x": "\(Int(cursorX))",
+            "y": "\(Int(cursorY))",
+            "type": type,
+            "buttons": button,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: map),
+           let json = String(data: data, encoding: .utf8) {
+            rd_session_send_mouse(sessionUUID, json)
         }
     }
 
