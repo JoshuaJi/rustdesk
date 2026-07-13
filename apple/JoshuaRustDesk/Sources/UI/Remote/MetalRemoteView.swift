@@ -224,10 +224,18 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
 
     // Viewport gestures (UIKit — smoother than hand-rolled multi-touch)
     private var pinchBaseZoom: CGFloat = 1
+    /// Pinch only applies after scale leaves the dead-zone (avoids stealing scroll).
+    private var pinchCommitted = false
+    private let pinchCommitThreshold: CGFloat = 0.12 // 12% scale change
+    /// Discrete wheel steps (matches Flutter mobile `scroll(±1)`).
     private var wheelAccumulator: CGFloat = 0
+    /// View-points of finger travel per remote wheel notch (lower = faster scroll).
+    private let wheelStepPoints: CGFloat = 14
     /// True while a 2-finger viewport gesture is active (suppress mouse).
     private var viewportGestureActive = false
     private var viewportGestureMoved = false
+    /// Prefer scroll vs pinch when two fingers move mostly in parallel.
+    private var twoFingerPanIsScroll = false
 
     // Shared single-finger tracking
     private var fingerStart: CGPoint?
@@ -739,18 +747,24 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
         switch g.state {
         case .began:
             viewportGestureActive = true
-            viewportGestureMoved = false
+            pinchCommitted = false
             pinchBaseZoom = userZoom
             releaseAllButtons(at: nil)
             cancelLongPress()
             resetFingerState()
         case .changed:
-            if abs(g.scale - 1) > 0.02 { viewportGestureMoved = true }
-            // g.scale is cumulative from gesture start → base * scale
+            // Dead-zone: ignore tiny pinches so two-finger *scroll* isn't stolen as zoom.
+            if !pinchCommitted {
+                if abs(g.scale - 1) < pinchCommitThreshold { return }
+                pinchCommitted = true
+                viewportGestureMoved = true
+                // Re-base so committing doesn't jump zoom.
+                pinchBaseZoom = userZoom / max(g.scale, 0.01)
+            }
             setZoom(pinchBaseZoom * g.scale, anchor: anchor)
         case .ended, .cancelled, .failed:
             viewportGestureActive = false
-            // Snap almost-fit back to 1×
+            pinchCommitted = false
             if userZoom < 1.05 {
                 resetViewport()
             }
@@ -764,37 +778,97 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
         case .began:
             viewportGestureActive = true
             viewportGestureMoved = false
+            twoFingerPanIsScroll = userZoom <= 1.02
             wheelAccumulator = 0
             releaseAllButtons(at: nil)
             cancelLongPress()
             resetFingerState()
+            // Scroll applies under the remote cursor — put it under the fingers first.
+            if twoFingerPanIsScroll {
+                sendMouse(type: "move", point: g.location(in: self), buttons: "")
+            }
         case .changed:
             let t = g.translation(in: self)
             g.setTranslation(.zero, in: self)
-            if hypot(t.x, t.y) > 0.5 { viewportGestureMoved = true }
+            let dist = hypot(t.x, t.y)
+            if dist > 0.5 { viewportGestureMoved = true }
 
-            if userZoom > 1.02 {
-                // Pan the zoomed viewport (finger follows content).
+            if userZoom > 1.02 && !twoFingerPanIsScroll {
+                // Pan the zoomed viewport (content follows fingers).
                 panOffset.x += t.x
                 panOffset.y += t.y
                 clampPan()
             } else {
-                // Fit view: two-finger drag = scroll wheel (Sidecar-like).
-                wheelAccumulator += t.y
-                let step: CGFloat = 16
-                while abs(wheelAccumulator) >= step {
-                    let dir = wheelAccumulator > 0 ? 1 : -1
-                    wheelAccumulator -= CGFloat(dir) * step
-                    // Natural: finger up → content moves up → negative wheel on many desktops
-                    sendWheel(deltaY: -dir * 100, at: g.location(in: self))
-                }
+                // Fit view (or scroll-locked): two-finger drag = remote scroll.
+                // Flutter mobile uses discrete wheel ±1 (Windows multiplies by WHEEL_DELTA=120).
+                // Sending ±100 was wrong and produced huge jumps / no usable scroll.
+                applyTwoFingerScroll(translation: t, at: g.location(in: self))
             }
         case .ended, .cancelled, .failed:
+            // Small fling: one extra notch if there was residual motion.
+            if twoFingerPanIsScroll || userZoom <= 1.02 {
+                let v = g.velocity(in: self)
+                if abs(v.y) > 400 {
+                    let notches = min(6, max(1, Int(abs(v.y) / 900)))
+                    // v.y > 0 = fling downward = more content below = wheel y negative in Flutter terms
+                    let y = v.y > 0 ? -1 : 1
+                    for _ in 0..<notches {
+                        sendWheelNotch(x: 0, y: y)
+                    }
+                }
+            }
             viewportGestureActive = false
             wheelAccumulator = 0
+            twoFingerPanIsScroll = false
         default:
             break
         }
+    }
+
+    /// Convert two-finger drag into remote scroll.
+    ///
+    /// Contract (matches Flutter mobile + `session_send_mouse`):
+    /// - `{"type":"wheel","x":"0","y":"±1"}` — **notches**, not pixels.
+    ///   Windows host multiplies by WHEEL_DELTA (120); sending ±100 caused huge jumps.
+    /// - Cursor is moved under the fingers first so the correct window scrolls.
+    private func applyTwoFingerScroll(translation t: CGPoint, at point: CGPoint) {
+        // Keep cursor under the gesture so the peer scrolls the focused/hovered window.
+        sendMouse(type: "move", point: point, buttons: "")
+
+        // Dominant-axis lock (Flutter trackpad filter idea).
+        let absX = abs(t.x)
+        let absY = abs(t.y)
+        let vertical = absY >= absX * 0.65
+        let horizontal = absX >= absY * 0.65
+
+        if vertical {
+            // Flutter PointerScroll: rawDy > 0 → send y = -1; rawDy < 0 → y = +1.
+            // Finger moving down (t.y > 0) ≈ scroll-down ≈ rawDy > 0 ≈ y = -1.
+            wheelAccumulator += t.y
+            while abs(wheelAccumulator) >= wheelStepPoints {
+                let dir = wheelAccumulator > 0 ? 1 : -1
+                wheelAccumulator -= CGFloat(dir) * wheelStepPoints
+                sendWheelNotch(x: 0, y: -dir)
+            }
+        } else if horizontal {
+            // Horizontal wheel (shift-scroll style): use x notches.
+            wheelAccumulator += t.x
+            while abs(wheelAccumulator) >= wheelStepPoints {
+                let dir = wheelAccumulator > 0 ? 1 : -1
+                wheelAccumulator -= CGFloat(dir) * wheelStepPoints
+                sendWheelNotch(x: -dir, y: 0)
+            }
+        }
+    }
+
+    /// Flutter `scroll` / wheel — x/y are small integers (±1), not pixel deltas.
+    private func sendWheelNotch(x: Int, y: Int) {
+        guard x != 0 || y != 0 else { return }
+        emit([
+            "type": "wheel",
+            "x": "\(x)",
+            "y": "\(y)",
+        ])
     }
 
     @objc private func handleTwoFingerDoubleTap(_ g: UITapGestureRecognizer) {
@@ -1075,14 +1149,6 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
             touchModeLeftDown = false
         }
         emit(map)
-    }
-
-    private func sendWheel(deltaY: Int, at point: CGPoint) {
-        emit([
-            "type": "wheel",
-            "x": "0",
-            "y": "\(deltaY)",
-        ])
     }
 
     private func emit(_ map: [String: String]) {
