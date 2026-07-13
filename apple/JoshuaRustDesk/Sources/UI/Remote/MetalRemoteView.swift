@@ -209,6 +209,9 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
 
     private var softKeyboardOn = false
     private var keyboardObservers: [NSObjectProtocol] = []
+    /// System long-press (fires in tracking mode — Timer on .default does not).
+    private var longPressGesture: UILongPressGestureRecognizer?
+    private var twoFingerRightTap: UITapGestureRecognizer?
     /// Fallback text field (subview of *this* view — never a secondary window /
     /// never a UIHostingController sibling that SwiftUI may strip).
     private lazy var softField: SoftKeyboardField = {
@@ -277,7 +280,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     private var fingerStart: CGPoint?
     private var lastFinger: CGPoint?
     private var fingerMoved = false
-    private var longPressTimer: Timer?
     /// Movement past this (view points) promotes a touch into a drag.
     private let dragThreshold: CGFloat = 12
 
@@ -818,7 +820,22 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         rightTap.numberOfTouchesRequired = 2
         rightTap.delegate = self
         rightTap.require(toFail: resetTap)
+        // Do NOT make pan require(toFail: rightTap) — that delays every scroll by the
+        // double-tap timeout. Pan only begins after movement; a still two-finger
+        // tap is recognized as right-click via shouldRecognizeSimultaneously=false.
         addGestureRecognizer(rightTap)
+        twoFingerRightTap = rightTap
+
+        // Single-finger long-press → right-click (UIKit, not Timer — timers on
+        // .default mode never fire while a finger is down / tracking mode).
+        let lp = UILongPressGestureRecognizer(target: self, action: #selector(handleLongPressGesture(_:)))
+        lp.minimumPressDuration = 0.45
+        lp.allowableMovement = dragThreshold
+        lp.numberOfTouchesRequired = 1
+        lp.cancelsTouchesInView = true // cancel left-click path after right-click
+        lp.delegate = self
+        addGestureRecognizer(lp)
+        longPressGesture = lp
     }
 
     @objc private func handlePinch(_ g: UIPinchGestureRecognizer) {
@@ -829,7 +846,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
             pinchCommitted = false
             pinchBaseZoom = userZoom
             releaseAllButtons(at: nil)
-            cancelLongPress()
             resetFingerState()
         case .changed:
             // Dead-zone: ignore tiny pinches so two-finger *scroll* isn't stolen as zoom.
@@ -860,7 +876,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
             twoFingerPanIsScroll = userZoom <= 1.02
             wheelAccumulator = 0
             releaseAllButtons(at: nil)
-            cancelLongPress()
             resetFingerState()
             // Scroll applies under the remote cursor — put it under the fingers first.
             if twoFingerPanIsScroll {
@@ -958,20 +973,48 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         guard g.state == .ended else { return }
         // Don't right-click if a pinch/pan just moved the viewport.
         guard !viewportGestureMoved else { return }
-        let p = g.location(in: self)
+        performRightClick(at: g.location(in: self))
+    }
+
+    @objc private func handleLongPressGesture(_ g: UILongPressGestureRecognizer) {
+        guard g.state == .began else { return }
+        // Multi-touch / viewport own the gesture.
+        guard activeTouches.count < 2, !viewportGestureActive else { return }
+        guard !fingerMoved, !touchModeDragging else { return }
+        performRightClick(at: g.location(in: self))
+        gestureConsumed = true
+    }
+
+    /// Absolute (touch mode) or at remote cursor (cursor mode).
+    private func performRightClick(at point: CGPoint) {
         if isCursorMode {
+            // Move cursor under the finger first so the menu opens at the right place,
+            // then click with the remote cursor coords.
+            let (x, y) = mapToRemote(point)
+            session?.moveCursorRemote(toX: CGFloat(x), y: CGFloat(y))
             session?.clickAtCursor(button: "right")
         } else {
-            click(at: p, button: "right", count: 1)
+            // Hover then right down/up (some hosts need the move first).
+            sendMouse(type: "move", point: point, buttons: "")
+            click(at: point, button: "right", count: 1)
         }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        gestureConsumed = true
     }
 
     func gestureRecognizer(
         _ gestureRecognizer: UIGestureRecognizer,
         shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
     ) -> Bool {
-        // Allow pinch + two-finger pan together (standard map UX).
-        true
+        // Pinch + two-finger pan together (map UX).
+        let a = gestureRecognizer
+        let b = otherGestureRecognizer
+        if a is UIPinchGestureRecognizer || b is UIPinchGestureRecognizer { return true }
+        if a is UIPanGestureRecognizer, b is UIPanGestureRecognizer { return true }
+        // Do not let pan/pinch run together with taps / long-press (kills right-click).
+        if a is UITapGestureRecognizer || b is UITapGestureRecognizer { return false }
+        if a is UILongPressGestureRecognizer || b is UILongPressGestureRecognizer { return false }
+        return true
     }
 
     func gestureRecognizer(
@@ -980,6 +1023,17 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     ) -> Bool {
         // Viewport gestures only care about multi-touch; single-finger stays on touches*.
         true
+    }
+
+    func gestureRecognizer(
+        _ gestureRecognizer: UIGestureRecognizer,
+        shouldBeRequiredToFailBy otherGestureRecognizer: UIGestureRecognizer
+    ) -> Bool {
+        // Two-finger right-tap should beat pan when there is no movement.
+        if gestureRecognizer === twoFingerRightTap, otherGestureRecognizer is UIPanGestureRecognizer {
+            return true
+        }
+        return false
     }
 
     /// Never let the 1×1 soft-keyboard field steal canvas hits.
@@ -995,9 +1049,10 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     //   • Finger down  → hover (move only, NO button)
     //   • Small lift   → click (down+up); double-tap → double-click
     //   • Move past threshold → left-down + drag; lift → left-up
-    //   • Long-press → right-click
+    //   • Long-press → right-click (UILongPressGestureRecognizer)
     // Cursor mode (trackpad):
-    //   • Drag moves remote cursor; tap clicks; long-press holds left
+    //   • Drag moves remote cursor; tap = left-click; long-press = right-click
+    //   • Two-finger tap = right-click
     // Viewport (both modes):
     //   • Pinch → zoom about fingers
     //   • Two-finger drag @ 1× → scroll wheel; when zoomed → pan view
@@ -1014,7 +1069,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
 
         // Multi-touch: viewport gestures own it — cancel single-finger mouse work.
         if activeTouches.count >= 2 || viewportGestureActive {
-            cancelLongPress()
             releaseAllButtons(at: touches.first.map { $0.location(in: self) })
             resetFingerState()
             return
@@ -1030,13 +1084,11 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         leftHeldInCursorMode = false
         gestureConsumed = false
 
-        if isCursorMode {
-            scheduleCursorModeLongPress()
-        } else {
+        if !isCursorMode {
             // Sidecar: hover to touch point — do NOT press the button yet.
+            // Long-press right-click is owned by UILongPressGestureRecognizer.
             releaseAllButtons(at: p)
             sendMouse(type: "move", point: p, buttons: "")
-            scheduleTouchModeLongPress(at: p)
         }
     }
 
@@ -1046,7 +1098,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         }
         // Never drive mouse with multi-finger or during viewport gestures.
         if activeTouches.count >= 2 || viewportGestureActive {
-            cancelLongPress()
             releaseAllButtons(at: nil)
             resetFingerState()
             return
@@ -1062,7 +1113,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         if isCursorMode {
             if travel > dragThreshold {
                 fingerMoved = true
-                cancelLongPress()
             }
             applyCursorModeDelta(dx: dx, dy: dy)
             return
@@ -1071,9 +1121,9 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         // —— Touch mode (Sidecar absolute) ——
         if !touchModeDragging {
             if travel > dragThreshold {
-                cancelLongPress()
                 touchModeDragging = true
                 fingerMoved = true
+                // Dragging cancels long-press (allowableMovement on the GR).
                 sendMouse(type: "down", point: start, buttons: "left")
                 sendMouse(type: "move", point: p, buttons: "")
             } else {
@@ -1087,7 +1137,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
         let endPoint = touches.first.map { $0.location(in: self) } ?? lastFinger
         for t in touches { activeTouches.removeValue(forKey: t) }
-        cancelLongPress()
 
         // Still multi or viewport gesture — mouse end handled elsewhere.
         if activeTouches.count >= 1 || viewportGestureActive {
@@ -1095,6 +1144,14 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
                 releaseAllButtons(at: endPoint)
                 resetFingerState()
             }
+            return
+        }
+
+        // Long-press already sent right-click (and cancelled touches) — do not left-click.
+        if gestureConsumed {
+            releaseAllButtons(at: endPoint)
+            touchModeDragging = false
+            resetFingerState()
             return
         }
 
@@ -1110,9 +1167,7 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         }
 
         // —— Touch mode end ——
-        if gestureConsumed {
-            releaseAllButtons(at: endPoint)
-        } else if touchModeDragging || touchModeLeftDown {
+        if touchModeDragging || touchModeLeftDown {
             if let endPoint {
                 sendMouse(type: "up", point: endPoint, buttons: "left")
             } else {
@@ -1133,9 +1188,11 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
         let endPoint = touches.first.map { $0.location(in: self) }
         for t in touches { activeTouches.removeValue(forKey: t) }
-        cancelLongPress()
+        // Long-press sets gestureConsumed before cancelling touches — keep it.
+        let kept = gestureConsumed
         releaseAllButtons(at: endPoint)
         resetFingerState()
+        if kept { gestureConsumed = true }
     }
 
     private func resetFingerState() {
@@ -1172,33 +1229,6 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
             sendMouse(type: "down", point: point, buttons: button)
             sendMouse(type: "up", point: point, buttons: button)
         }
-    }
-
-    private func scheduleCursorModeLongPress() {
-        cancelLongPress()
-        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
-            guard let self, self.isCursorMode, !self.fingerMoved else { return }
-            self.leftHeldInCursorMode = true
-            self.session?.mouseButtonAtCursor(type: "down", button: "left")
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        }
-    }
-
-    private func scheduleTouchModeLongPress(at point: CGPoint) {
-        cancelLongPress()
-        longPressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: false) { [weak self] _ in
-            guard let self, !self.isCursorMode, !self.touchModeDragging, !self.gestureConsumed else { return }
-            guard !self.fingerMoved else { return }
-            // Context menu (right-click) under finger.
-            self.click(at: point, button: "right", count: 1)
-            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-            self.gestureConsumed = true
-        }
-    }
-
-    private func cancelLongPress() {
-        longPressTimer?.invalidate()
-        longPressTimer = nil
     }
 
     private func applyCursorModeDelta(dx: CGFloat, dy: CGFloat) {
