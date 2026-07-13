@@ -31,6 +31,8 @@ const uint8_t *rd_session_get_rgba(const char *session_uuid, size_t display);
 const uint8_t *session_get_rgba(const char *session_uuid, size_t display);
 void rd_session_next_rgba(const char *session_uuid, size_t display);
 void rd_session_set_size(const char *session_uuid, size_t display, size_t width, size_t height);
+/// Request host OS resolution change (display is 0-based).
+void rd_session_change_resolution(const char *session_uuid, int display, int width, int height);
 /// Switch captured remote display (0-based index).
 void rd_session_switch_display(const char *session_uuid, int display);
 

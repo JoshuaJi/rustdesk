@@ -12,6 +12,9 @@ struct MetalRemoteView: UIViewRepresentable {
         Coordinator(session: session)
     }
 
+    /// Matches SwiftUI card radius; CAMetalLayer ignores clipShape without this.
+    static let cornerRadius: CGFloat = 14
+
     func makeUIView(context: Context) -> TouchMetalView {
         let v = TouchMetalView(frame: .zero, device: MTLCreateSystemDefaultDevice())
         v.coordinator = context.coordinator
@@ -24,6 +27,11 @@ struct MetalRemoteView: UIViewRepresentable {
         v.preferredFramesPerSecond = 60
         v.isMultipleTouchEnabled = true
         v.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // MTKView / CAMetalLayer: SwiftUI clipShape alone does nothing — need layer mask.
+        v.layer.cornerRadius = Self.cornerRadius
+        v.layer.cornerCurve = .continuous
+        v.layer.masksToBounds = true
+        v.clipsToBounds = true
         context.coordinator.attach(view: v)
         DispatchQueue.main.async {
             _ = v.becomeFirstResponder()
@@ -36,6 +44,10 @@ struct MetalRemoteView: UIViewRepresentable {
         uiView.session = session
         uiView.captureSystemShortcuts = session.captureSystemShortcuts
         uiView.setSoftKeyboard(session.softKeyboardVisible)
+        uiView.layer.cornerRadius = Self.cornerRadius
+        uiView.layer.cornerCurve = .continuous
+        uiView.layer.masksToBounds = true
+        uiView.clipsToBounds = true
         let size = uiView.bounds.size
         if size.width > 1, size.height > 1 {
             onSize(size)
@@ -65,17 +77,12 @@ struct MetalRemoteView: UIViewRepresentable {
 
         private func buildPipeline(view: MTKView) {
             guard let device else { return }
-            // Vertex positions + UVs driven by viewport transform (pan/zoom).
+            // Simple textured quad. Rounded corners come from MTKView.layer (not fragment mask).
             let src = """
             #include <metal_stdlib>
             using namespace metal;
             struct VOut { float4 pos [[position]]; float2 uv; };
-            struct Uniforms {
-                float2 origin;   // content rect origin in NDC-ish space handled below
-                float2 size;     // content rect size in clip space units (-1..1 full)
-            };
             vertex VOut v_main(uint vid [[vertex_id]], constant float4 &vp [[buffer(0)]]) {
-                // vp = (x, y, w, h) in NDC where full view is (-1,-1)-(1,1)
                 float2 corners[4] = {
                     float2(vp.x,        vp.y),
                     float2(vp.x+vp.z,   vp.y),
@@ -90,8 +97,7 @@ struct MetalRemoteView: UIViewRepresentable {
             }
             fragment float4 f_main(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
                 constexpr sampler s(address::clamp_to_edge, filter::linear);
-                // Outside UV still samples edge; we clear to black first.
-                if (in.uv.x < 0 || in.uv.x > 1 || in.uv.y < 0 || in.uv.y > 1)
+                if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0)
                     return float4(0,0,0,1);
                 return tex.sample(s, in.uv);
             }

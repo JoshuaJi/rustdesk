@@ -98,6 +98,13 @@ final class SessionController: ObservableObject {
     private var didEnsureControlMode = false
     /// Only force-enable audio once per connection (don't fight mute).
     private var didEnsureAudio = false
+    /// Last canvas size reported by Metal view (points × scale).
+    private var lastViewW = 0
+    private var lastViewH = 0
+    /// Last resolution we asked the host to use.
+    private var lastRequestedResW = 0
+    private var lastRequestedResH = 0
+    private var resolutionWork: DispatchWorkItem?
     /// Last text we wrote to / read from pasteboard for loop suppression.
     private var lastPushedClipboard: String = ""
     private var lastReceivedClipboard: String = ""
@@ -126,12 +133,15 @@ final class SessionController: ObservableObject {
         setStage("Looking up \(peerId)…")
         softKeyboardVisible = false
         viewOnly = false
-        audioMuted = false
+        audioMuted = true
         didEnsureControlMode = false
         didEnsureAudio = false
+        lastRequestedResW = 0
+        lastRequestedResH = 0
+        resolutionWork?.cancel()
+        resolutionWork = nil
         clearModifiers(sendKeyUp: false)
-        // Start remote audio path (Rust Opus → Swift PCM player).
-        RemoteAudioPlayer.shared.start()
+        // Audio playback disabled for now (host capture unreliable).
         connectionSecure = false
         connectionDirect = false
         streamType = ""
@@ -182,11 +192,12 @@ final class SessionController: ObservableObject {
         }
         active = true
 
-        // Prefer remote audio from the first OptionMessage (don't wait for peer_info).
-        if rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0 {
+        // Prefer audio off (no local playback yet).
+        if rd_session_get_toggle_option(sessionUUID, "disable-audio") == 0 {
             rd_session_toggle_option(sessionUUID, "disable-audio")
-            didEnsureAudio = true
         }
+        didEnsureAudio = true
+        audioMuted = true
 
         if !password.isEmpty {
             setStage("Authenticating…")
@@ -240,7 +251,6 @@ final class SessionController: ObservableObject {
         }
         softKeyboardVisible = false
         stopPasteboardObserver()
-        RemoteAudioPlayer.shared.stop()
         // Release sticky modifiers on the peer while session is still active.
         if active {
             clearModifiers(sendKeyUp: true)
@@ -301,6 +311,10 @@ final class SessionController: ObservableObject {
             statusText = connectionSummary.isEmpty ? "Connected" : "Connected · \(connectionSummary)"
         }
         refreshToggleState()
+        // Once connected, resize host desktop to fill the iPad canvas.
+        if lastViewW > 0, lastViewH > 0 {
+            scheduleFillResolution(width: lastViewW, height: lastViewH)
+        }
     }
 
     // MARK: - Pointer / view
@@ -360,7 +374,44 @@ final class SessionController: ObservableObject {
     func setViewSize(width: Int, height: Int) {
         guard active, width > 0, height > 0 else { return }
         let display = max(0, currentDisplayIndex)
+        // Soft-renderer client viewport (for letterbox math / encoder hints).
         rd_session_set_size(sessionUUID, display, width, height)
+        lastViewW = width
+        lastViewH = height
+        // Debounce host resolution changes so rotate / layout thrash is quiet.
+        scheduleFillResolution(width: width, height: height)
+    }
+
+    /// Ask the host to resize the remote desktop to fill the iPad canvas aspect.
+    /// Even dimensions help video codecs; we keep a modest max edge.
+    private func scheduleFillResolution(width: Int, height: Int) {
+        resolutionWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.applyFillResolution(width: width, height: height)
+        }
+        resolutionWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45, execute: work)
+    }
+
+    private func applyFillResolution(width: Int, height: Int) {
+        guard active, phase == .connected, width > 0, height > 0 else { return }
+        // Even sizes; clamp so we don't request absurd host modes.
+        var w = (max(640, min(width, 2560)) / 2) * 2
+        var h = (max(480, min(height, 1600)) / 2) * 2
+        // Skip if already essentially matching current remote size (±2%).
+        if displayWidth > 0, displayHeight > 0 {
+            let dw = abs(displayWidth - w)
+            let dh = abs(displayHeight - h)
+            if dw <= max(8, displayWidth / 50), dh <= max(8, displayHeight / 50) {
+                return
+            }
+        }
+        if w == lastRequestedResW, h == lastRequestedResH { return }
+        lastRequestedResW = w
+        lastRequestedResH = h
+        let display = Int32(max(0, currentDisplayIndex))
+        rd_session_change_resolution(sessionUUID, display, Int32(w), Int32(h))
+        statusText = "Res \(w)×\(h)"
     }
 
     // MARK: - Multi-display
@@ -388,6 +439,12 @@ final class SessionController: ObservableObject {
         if displayWidth > 0, displayHeight > 0 {
             cursorX = CGFloat(displayWidth) / 2
             cursorY = CGFloat(displayHeight) / 2
+        }
+        // Re-fit host resolution for the new display using current canvas size.
+        lastRequestedResW = 0
+        lastRequestedResH = 0
+        if lastViewW > 0, lastViewH > 0 {
+            scheduleFillResolution(width: lastViewW, height: lastViewH)
         }
     }
 
@@ -559,24 +616,19 @@ final class SessionController: ObservableObject {
         statusText = viewOnly ? "View only" : "Control enabled"
     }
 
-    /// Mute / unmute remote desktop audio (`disable-audio` peer option).
+    /// Audio UI is hidden; keep peer option disabled so host skips capture when possible.
     func toggleAudioMuted() {
-        guard active else { return }
-        rd_session_toggle_option(sessionUUID, "disable-audio")
-        // disable-audio ON means muted.
-        audioMuted = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
-        RemoteAudioPlayer.shared.setLocalMuted(audioMuted)
-        statusText = audioMuted ? "Audio muted" : "Audio on"
+        // no-op while playback is disabled
     }
 
     func setAudioMuted(_ muted: Bool) {
+        audioMuted = muted
         guard active else { return }
         let currently = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
+        // muted == true → disable-audio should be ON
         if currently != muted {
             rd_session_toggle_option(sessionUUID, "disable-audio")
         }
-        audioMuted = muted
-        RemoteAudioPlayer.shared.setLocalMuted(muted)
     }
 
     /// Cursor mode when remote cursor is on; touch mode when off.
@@ -597,9 +649,9 @@ final class SessionController: ObservableObject {
         ensureControlMode()
         // Sync mode from peer option (do not force either way).
         applyCursorModeFromPeer()
-        // Ensure audio is on by default for the session (unmute if peer config left it muted).
-        ensureAudioEnabled()
-        audioMuted = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
+        // Keep remote audio disabled until host capture + playback are re-enabled.
+        ensureAudioDisabled()
+        audioMuted = true
         if let p = rd_session_get_image_quality(sessionUUID) {
             let q = String(cString: p)
             rd_free_string(p)
@@ -609,12 +661,12 @@ final class SessionController: ObservableObject {
         }
     }
 
-    /// Prefer remote audio on for new sessions (once — respect later mute).
-    private func ensureAudioEnabled() {
+    /// Prefer remote audio off for now (once per connection).
+    private func ensureAudioDisabled() {
         guard !didEnsureAudio else { return }
         didEnsureAudio = true
         let disabled = rd_session_get_toggle_option(sessionUUID, "disable-audio") != 0
-        if disabled {
+        if !disabled {
             rd_session_toggle_option(sessionUUID, "disable-audio")
         }
     }

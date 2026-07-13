@@ -17,57 +17,49 @@ struct RemoteSessionView: View {
                 .frame(maxHeight: .infinity)
                 .background(Color.black.opacity(0.92))
 
-            // Remote canvas occupies remaining space only — never under the sidebar.
+            // HUD above desktop (not overlaid on the remote picture).
             ZStack {
-                Color.black
-
-                MetalRemoteView(
-                    session: session,
-                    onSize: { size in
-                        // Soft keyboard floats over the canvas; do not renegotiate
-                        // remote viewport size when iOS temporarily shrinks bounds.
-                        guard !session.softKeyboardVisible else { return }
-                        let s = UIScreen.main.scale
-                        session.setViewSize(
-                            width: Int(size.width * s),
-                            height: Int(size.height * s)
-                        )
-                    }
-                )
-                .ignoresSafeArea(.keyboard)
-
-                // Lightweight HUD over canvas only (not over sidebar).
-                VStack(alignment: .trailing, spacing: 6) {
-                    HStack {
-                        Spacer()
+                VStack(spacing: 0) {
+                    HStack(spacing: 8) {
+                        Spacer(minLength: 0)
                         statusPill
-                            .padding(.trailing, 12)
-                            .padding(.top, 10)
-                    }
-                    if session.showQualityHUD, session.phase == .connected {
-                        HStack {
-                            Spacer()
-                            qualityPill
-                                .padding(.trailing, 12)
-                        }
-                    }
-                    if !session.lastClipboardNote.isEmpty {
-                        HStack {
-                            Spacer()
+                        if !session.lastClipboardNote.isEmpty {
                             Text(session.lastClipboardNote)
                                 .font(.caption2)
                                 .foregroundStyle(.white.opacity(0.9))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
                                 .background(.black.opacity(0.45), in: Capsule())
-                                .padding(.trailing, 12)
                                 .transition(.opacity)
                         }
                     }
-                    Spacer()
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.black)
+                    .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
+
+                    MetalRemoteView(
+                        session: session,
+                        onSize: { size in
+                            // Soft keyboard floats over the canvas; do not renegotiate
+                            // remote viewport size when iOS temporarily shrinks bounds.
+                            guard !session.softKeyboardVisible else { return }
+                            let s = UIScreen.main.scale
+                            session.setViewSize(
+                                width: Int(size.width * s),
+                                height: Int(size.height * s)
+                            )
+                        }
+                    )
+                    // Corners via MTKView.layer (CAMetalLayer ignores SwiftUI clipShape alone).
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .ignoresSafeArea(.keyboard)
                 }
-                .allowsHitTesting(false)
-                .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
 
                 if case .needPassword = session.phase {
                     passwordSheet
@@ -178,14 +170,6 @@ struct RemoteSessionView: View {
                 }
             }
 
-            sidebarIconButton(
-                systemName: session.audioMuted ? "speaker.slash.fill" : "speaker.wave.2.fill",
-                label: session.audioMuted ? "Unmute audio" : "Mute audio",
-                emphasized: !session.audioMuted
-            ) {
-                session.toggleAudioMuted()
-            }
-
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
             modButton("⌃", active: session.modControl, label: "Control") {
@@ -269,8 +253,8 @@ struct RemoteSessionView: View {
 
     private var connectionDotColor: Color {
         if session.phase != .connected { return .orange.opacity(0.9) }
-        if session.connectionDirect { return .green.opacity(0.9) }
-        return .yellow.opacity(0.9)
+        if session.connectionDirect { return .green.opacity(0.95) }
+        return .green.opacity(0.55) // relay still green, slightly dimmer
     }
 
     private func modButton(_ title: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
@@ -281,7 +265,7 @@ struct RemoteSessionView: View {
                 .frame(width: 40, height: 36)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(active ? Color.accentColor : Color.white.opacity(0.08))
+                        .fill(active ? Color.white : Color.white.opacity(0.08))
                 )
         }
         .buttonStyle(.plain)
@@ -299,7 +283,7 @@ struct RemoteSessionView: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(emphasized ? Color.accentColor : Color.white.opacity(0.92))
+                .foregroundStyle(Color.white.opacity(emphasized ? 1.0 : 0.92))
                 .frame(width: 40, height: 40)
                 .background(
                     Circle()
@@ -313,13 +297,19 @@ struct RemoteSessionView: View {
 
     private var statusPill: some View {
         HStack(spacing: 6) {
+            // Quality HUD sits to the left of Touch/Cursor.
+            if session.showQualityHUD, session.phase == .connected {
+                qualityHUDPrefix
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+            }
             Text(session.showRemoteCursor ? "Cursor" : "Touch")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
             if !session.modifiersSummary.isEmpty {
                 Text(session.modifiersSummary)
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.white)
             }
             Text("·")
                 .foregroundStyle(.white.opacity(0.35))
@@ -333,7 +323,7 @@ struct RemoteSessionView: View {
                 if session.hasMultipleDisplays {
                     Text("D\(session.displaySummary)")
                         .font(.caption2.monospacedDigit().weight(.semibold))
-                        .foregroundStyle(Color.accentColor.opacity(0.95))
+                        .foregroundStyle(.white.opacity(0.95))
                 }
                 Text("\(session.displayWidth)×\(session.displayHeight)")
                     .font(.caption2.monospacedDigit())
@@ -345,60 +335,32 @@ struct RemoteSessionView: View {
         .background(.black.opacity(0.45), in: Capsule())
     }
 
-    private var qualityPill: some View {
-        HStack(spacing: 6) {
+    @ViewBuilder
+    private var qualityHUDPrefix: some View {
+        HStack(spacing: 5) {
             Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
                 .font(.caption2)
-                .foregroundStyle(session.connectionDirect ? .green : .yellow)
+                .foregroundStyle(.white.opacity(session.connectionDirect ? 0.95 : 0.55))
             if !session.connectionSummary.isEmpty {
                 Text(session.connectionSummary)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.white.opacity(0.85))
             }
             if !session.qualitySummary.isEmpty {
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
                 Text(session.qualitySummary)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.9))
             }
             if session.isHardDecodeCodec {
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
                 Text("VT")
                     .font(.caption2.weight(.bold))
-                    .foregroundStyle(.green)
+                    .foregroundStyle(.white)
             } else if !session.qualityCodec.isEmpty {
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
                 Text(session.qualityCodec)
                     .font(.caption2)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.white.opacity(0.75))
             }
-            Text("·")
-                .foregroundStyle(.white.opacity(0.35))
-            let aud = RemoteAudioPlayer.shared
-            let label: String = {
-                if session.audioMuted { return "MUTE" }
-                if aud.framesReceived > 0 {
-                    // Peak tip: 0.00 ≈ silent decode; >0.01 ≈ real signal.
-                    return aud.lastPeak > 0.01 ? "AUD" : "AUD₀"
-                }
-                return "…"
-            }()
-            Text(label)
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(
-                    session.audioMuted
-                        ? .orange
-                        : (aud.framesReceived > 0
-                            ? (aud.lastPeak > 0.01 ? .green : .yellow)
-                            : .white.opacity(0.5))
-                )
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.4), in: Capsule())
     }
 
     // MARK: - Overlays
@@ -427,6 +389,7 @@ struct RemoteSessionView: View {
                     session.submitPassword(password)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.white)
                 .disabled(password.isEmpty)
             }
         }
@@ -438,7 +401,7 @@ struct RemoteSessionView: View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.largeTitle)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.white)
             Text("Connection failed")
                 .font(.headline)
                 .foregroundStyle(.white)
@@ -458,6 +421,7 @@ struct RemoteSessionView: View {
                     session.reconnect()
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.white)
             }
         }
         .padding(22)

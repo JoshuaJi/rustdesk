@@ -8,8 +8,8 @@ use crate::{
     flutter_ffi::{
         main_init, session_change_prefer_codec, session_close, session_get_image_quality,
         session_get_toggle_option, session_input_key, session_input_string, session_login,
-        session_peer_option, session_send_mouse, session_set_image_quality, session_set_size,
-        session_toggle_option, SessionID,
+        session_change_resolution, session_peer_option, session_send_mouse,
+        session_set_image_quality, session_set_size, session_toggle_option, SessionID,
     },
     ui_interface::{get_id, get_option, peer_to_map, set_option},
 };
@@ -204,6 +204,23 @@ pub extern "C" fn rd_session_set_size(
     if let Some(sid) = parse_session_id(session_uuid) {
         session_set_size(sid, display, width, height);
     }
+}
+
+/// Ask the host to change the remote display resolution (so the desktop can fill the client).
+#[no_mangle]
+pub extern "C" fn rd_session_change_resolution(
+    session_uuid: *const c_char,
+    display: c_int,
+    width: c_int,
+    height: c_int,
+) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    if width < 320 || height < 240 {
+        return;
+    }
+    session_change_resolution(sid, display, width, height);
 }
 
 /// Switch the captured remote display (0-based). Soft-renderer path captures
@@ -460,6 +477,7 @@ pub extern "C" fn rd_force_link() {
         rd_session_set_codec_preference as *const (),
         rd_session_send_clipboard as *const (),
         rd_session_switch_display as *const (),
+        rd_session_change_resolution as *const (),
         rd_set_pcm_callback as *const (),
         rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),

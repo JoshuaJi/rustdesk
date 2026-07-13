@@ -1,6 +1,5 @@
 import UIKit
 import GameController
-import AVFoundation
 
 class AppDelegate: NSObject, UIApplicationDelegate {
     func application(
@@ -10,19 +9,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
         // Keep rustdesk static symbols from being stripped.
         rd_force_link()
         _ = session_get_rgba(nil, 0)
-
-        // Prepare audio session early so remote desktop PCM can play.
-        // Keep options minimal — some option combos return OSStatus -50 on iPadOS.
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-        } catch {
-            do {
-                try AVAudioSession.sharedInstance().setCategory(.playback)
-            } catch {
-                NSLog("AVAudioSession setup: \(error)")
-            }
-        }
 
         if #available(iOS 14.0, *) {
             NotificationCenter.default.addObserver(

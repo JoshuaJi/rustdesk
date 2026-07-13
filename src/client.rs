@@ -1210,9 +1210,43 @@ fn has_ios_pcm_callback() -> bool {
 }
 
 #[cfg(target_os = "ios")]
-fn push_ios_pcm(samples: &[f32], sample_rate: u32, channels: u16) {
+fn push_ios_pcm(samples: &mut [f32], sample_rate: u32, channels: u16) {
     if samples.is_empty() {
         return;
+    }
+    // Sanitize + measure peak/RMS. Host capture is often very quiet (or mic-only
+    // on macOS without loopback). AUD₀ means raw peak < ~0.01.
+    let mut peak = 0.0f32;
+    let mut sum_sq = 0.0f64;
+    let mut nonzero = 0u32;
+    for s in samples.iter_mut() {
+        if !s.is_finite() {
+            *s = 0.0;
+            continue;
+        }
+        let a = s.abs();
+        if a > peak {
+            peak = a;
+        }
+        if a > 1e-8 {
+            nonzero += 1;
+        }
+        sum_sq += (a as f64) * (a as f64);
+    }
+    let rms = ((sum_sq / samples.len().max(1) as f64).sqrt()) as f32;
+    // Aggressive make-up: target peak ~0.55, allow very large gain for quiet hosts.
+    // Prefer peak AGC; if peak is tiny but RMS has energy, use RMS instead.
+    let raw_peak = peak;
+    let mut applied_gain = 1.0f32;
+    if peak > 1e-9 && peak < 0.55 {
+        applied_gain = (0.55 / peak).min(4000.0);
+    } else if peak <= 1e-9 && rms > 1e-9 {
+        applied_gain = (0.20 / rms).min(4000.0);
+    }
+    if applied_gain > 1.001 {
+        for s in samples.iter_mut() {
+            *s = (*s * applied_gain).clamp(-1.0, 1.0);
+        }
     }
     // Copy callback out of the lock so Swift never re-enters while held.
     let sink = {
@@ -1224,13 +1258,17 @@ fn push_ios_pcm(samples: &[f32], sample_rate: u32, channels: u16) {
     };
     static PUSHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = PUSHED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if n == 0 || n % 250 == 0 {
+    if n == 0 || n % 50 == 0 {
         log::info!(
-            "iOS PCM push #{}: {} floats @ {} Hz × {} ch",
+            "iOS PCM push #{}: {} floats @ {} Hz × {} ch raw_peak={:.6} rms={:.6} nz={} gain={:.1}",
             n,
             samples.len(),
             sample_rate,
-            channels
+            channels,
+            raw_peak,
+            rms,
+            nonzero,
+            applied_gain
         );
     }
     (sink.0)(
@@ -1522,50 +1560,115 @@ impl AudioHandler {
             return;
         }
         self.audio_decoder.as_mut().map(|(d, buffer)| {
+            let pkt_len = frame.data.len();
+            #[cfg(target_os = "ios")]
+            if ios_pcm {
+                // iOS: decode to i16 then convert — same Opus state machine as desktop
+                // float path, but values are easier to verify and gain-scale.
+                let channels = self.channels.max(1) as usize;
+                // Opus max frame is 120ms → 5760 samples/ch @ 48 kHz.
+                let mut i16buf = vec![0i16; 5760 * channels];
+                match d.decode(&frame.data, &mut i16buf, false) {
+                    Ok(n_per_ch) => {
+                        let n = n_per_ch * channels;
+                        if n == 0 || n > i16buf.len() {
+                            log::warn!(
+                                "iOS audio decode odd size n_per_ch={n_per_ch} ch={channels} pkt={}",
+                                pkt_len
+                            );
+                            return;
+                        }
+                        let mut peak_i: i32 = 0;
+                        for s in &i16buf[0..n] {
+                            let a = (*s as i32).unsigned_abs() as i32;
+                            if a > peak_i {
+                                peak_i = a;
+                            }
+                        }
+                        static DEC: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let dn = DEC.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if dn == 0 || dn % 100 == 0 {
+                            log::info!(
+                                "iOS audio decode #{} pkt={} n_per_ch={} ch={} peak_i16={}",
+                                dn,
+                                pkt_len,
+                                n_per_ch,
+                                channels,
+                                peak_i
+                            );
+                        }
+                        let mut fbuf: Vec<f32> = i16buf[0..n]
+                            .iter()
+                            .map(|s| *s as f32 / 32768.0)
+                            .collect();
+                        push_ios_pcm(&mut fbuf, self.sample_rate.0, self.channels);
+                    }
+                    Err(e) => {
+                        static FAIL: std::sync::atomic::AtomicU64 =
+                            std::sync::atomic::AtomicU64::new(0);
+                        let fn_ = FAIL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if fn_ < 10 || fn_ % 50 == 0 {
+                            log::warn!("iOS audio decode fail #{} pkt={} err={e}", fn_, pkt_len);
+                        }
+                        // PLC
+                        if let Ok(n_per_ch) = d.decode(&[], &mut i16buf, true) {
+                            let n = n_per_ch * channels;
+                            if n > 0 && n <= i16buf.len() {
+                                let mut fbuf: Vec<f32> = i16buf[0..n]
+                                    .iter()
+                                    .map(|s| *s as f32 / 32768.0)
+                                    .collect();
+                                push_ios_pcm(&mut fbuf, self.sample_rate.0, self.channels);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
             match d.decode_float(&frame.data, buffer, false) {
-                Ok(n) => {
-                let channels = self.channels;
-                let n = n * (channels as usize);
-                if n == 0 || n > buffer.len() {
-                    log::warn!("audio decode odd size n={n} buf={}", buffer.len());
-                    return;
-                }
-                #[cfg(target_os = "ios")]
-                if ios_pcm {
-                    // Deliver at the remote sample rate (no cpal rechannel).
-                    push_ios_pcm(&buffer[0..n], self.sample_rate.0, channels);
-                    return;
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    let sample_rate0 = self.sample_rate.0;
-                    let sample_rate = self.sample_rate.1;
-                    let mut buffer = buffer[0..n].to_owned();
-                    if sample_rate != sample_rate0 {
-                        buffer = crate::audio_resample(
-                            &buffer[0..n],
-                            sample_rate0,
-                            sample_rate,
-                            channels,
+                Ok(n_per_ch) => {
+                    let channels = self.channels as usize;
+                    let n = n_per_ch * channels;
+                    if n == 0 || n > buffer.len() {
+                        log::warn!(
+                            "audio decode odd size n_per_ch={n_per_ch} ch={channels} buf={} pkt={}",
+                            buffer.len(),
+                            pkt_len
                         );
+                        return;
                     }
-                    if self.channels != self.device_channel {
-                        buffer = crate::audio_rechannel(
-                            buffer,
-                            sample_rate,
-                            sample_rate,
-                            self.channels,
-                            self.device_channel,
-                        );
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        let sample_rate0 = self.sample_rate.0;
+                        let sample_rate = self.sample_rate.1;
+                        let mut buffer = buffer[0..n].to_owned();
+                        if sample_rate != sample_rate0 {
+                            buffer = crate::audio_resample(
+                                &buffer[0..n],
+                                sample_rate0,
+                                sample_rate,
+                                self.channels,
+                            );
+                        }
+                        if self.channels != self.device_channel {
+                            buffer = crate::audio_rechannel(
+                                buffer,
+                                sample_rate,
+                                sample_rate,
+                                self.channels,
+                                self.device_channel,
+                            );
+                        }
+                        self.audio_buffer.append_pcm(&buffer);
                     }
-                    self.audio_buffer.append_pcm(&buffer);
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    let data_u8 =
-                        unsafe { std::slice::from_raw_parts::<u8>(buffer.as_ptr() as _, n * 4) };
-                    self.simple.as_mut().map(|x| x.write(data_u8));
-                }
+                    #[cfg(target_os = "linux")]
+                    {
+                        let data_u8 = unsafe {
+                            std::slice::from_raw_parts::<u8>(buffer.as_ptr() as _, n * 4)
+                        };
+                        self.simple.as_mut().map(|x| x.write(data_u8));
+                    }
                 }
                 Err(e) => {
                     log::trace!("audio decode failed: {e}");

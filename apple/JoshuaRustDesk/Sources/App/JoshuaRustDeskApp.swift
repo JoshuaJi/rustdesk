@@ -9,6 +9,9 @@ struct JoshuaRustDeskApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(bridge)
+                .tint(.white)
+                // White accents need a dark chrome; remote UI is already black.
+                .preferredColorScheme(.dark)
                 .onAppear {
                     bridge.bootstrap()
                 }
@@ -23,8 +26,13 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             HomeView()
-                .navigationTitle("RustDesk")
+                // Document-picker home: title lives in the grid header, not the nav bar.
+                .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
+                    ToolbarItem(placement: .principal) {
+                        Text("RustDesk")
+                            .font(.headline)
+                    }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button {
                             showSettings = true
