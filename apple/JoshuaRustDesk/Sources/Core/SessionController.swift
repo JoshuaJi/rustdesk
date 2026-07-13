@@ -413,7 +413,7 @@ final class SessionController: ObservableObject {
         lastRequestedResH = h
         let display = Int32(max(0, currentDisplayIndex))
         rd_session_change_resolution(sessionUUID, display, Int32(w), Int32(h))
-        statusText = "Res \(w)×\(h)"
+        // Don't stomp statusText with "Res …" — HUD shows display size as its own field.
     }
 
     // MARK: - Multi-display

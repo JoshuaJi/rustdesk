@@ -456,81 +456,73 @@ struct RemoteSessionView: View {
         .help(label)
     }
 
-    // MARK: - Status HUD (single capsule — appears/disappears as one unit)
+    // MARK: - Status HUD ("Cursor · … · Res" — one capsule, snap updates, no morph trail)
 
-    /// One pill for mode + status + optional clipboard note (no twin capsules / trail).
-    private var hudPill: some View {
-        HStack(spacing: isCompact ? 5 : 6) {
-            if isCompact {
-                compactStatusContent
-            } else {
-                fullStatusContent
-            }
-            if !session.lastClipboardNote.isEmpty {
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
-                Text(session.lastClipboardNote)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .lineLimit(1)
-            }
-        }
-        .padding(.horizontal, isCompact ? 10 : 12)
-        .padding(.vertical, isCompact ? 5 : 7)
-        .background(.black.opacity(0.45), in: Capsule())
-        // Snap content changes; only opacity-fade the whole pill when clipboard toggles.
-        .contentTransition(.identity)
-        .animation(.easeOut(duration: 0.18), value: session.lastClipboardNote.isEmpty)
-        .drawingGroup() // composite as one layer — no leftover trail on fade/layout
+    /// Structural identity so quality/clipboard toggles rebuild the whole pill together.
+    private var hudStructureKey: String {
+        [
+            isCompact ? "c" : "r",
+            session.showRemoteCursor ? "cur" : "tch",
+            session.showQualityHUD ? "q1" : "q0",
+            session.lastClipboardNote.isEmpty ? "0" : "1",
+            session.modifiersSummary,
+            session.phase == .connected ? "on" : "off",
+        ].joined(separator: "|")
     }
 
-    private var compactStatusContent: some View {
-        HStack(spacing: 5) {
+    private var hudPill: some View {
+        HStack(spacing: isCompact ? 5 : 6) {
             Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
                 .font(.caption2)
                 .foregroundStyle(.white.opacity(session.connectionDirect ? 0.95 : 0.55))
+
+            if !isCompact, session.showQualityHUD, session.phase == .connected {
+                if !session.connectionSummary.isEmpty {
+                    Text(session.connectionSummary)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.85))
+                }
+                if !session.qualitySummary.isEmpty {
+                    Text(session.qualitySummary)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+                if session.isHardDecodeCodec {
+                    Text("VT")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.white)
+                } else if !session.qualityCodec.isEmpty {
+                    Text(session.qualityCodec)
+                        .font(.caption2)
+                        .foregroundStyle(.white.opacity(0.75))
+                }
+                Text("·").foregroundStyle(.white.opacity(0.35))
+            }
+
             Text(session.showRemoteCursor ? "Cursor" : "Touch")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.75))
-            if !session.modifiersSummary.isEmpty {
-                Text(session.modifiersSummary)
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-            }
-            Text("·")
-                .foregroundStyle(.white.opacity(0.35))
-            Text(session.statusText)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-        }
-    }
 
-    private var fullStatusContent: some View {
-        HStack(spacing: 6) {
-            if session.showQualityHUD, session.phase == .connected {
-                qualityHUDPrefix
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
-            }
-            Text(session.showRemoteCursor ? "Cursor" : "Touch")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.white.opacity(0.7))
             if !session.modifiersSummary.isEmpty {
                 Text(session.modifiersSummary)
                     .font(.caption2.weight(.bold))
                     .foregroundStyle(.white)
             }
-            Text("·")
-                .foregroundStyle(.white.opacity(0.35))
-            Text(session.statusText)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-            if session.displayWidth > 0 {
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
+
+            // Status line (connection / actions) — never "Res …" (size is next field).
+            if !session.statusText.isEmpty,
+               !session.statusText.hasPrefix("Res ") {
+                Text("·").foregroundStyle(.white.opacity(0.35))
+                Text(session.statusText)
+                    .font(isCompact ? .caption2.weight(.medium) : .caption.weight(.medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
+
+            // Display size always its own slot (stable label, no statusText stomp).
+            if session.displayWidth > 0, session.displayHeight > 0 {
+                Text("·").foregroundStyle(.white.opacity(0.35))
                 if session.hasMultipleDisplays {
                     Text("D\(session.displaySummary)")
                         .font(.caption2.monospacedDigit().weight(.semibold))
@@ -540,35 +532,21 @@ struct RemoteSessionView: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.75))
             }
-        }
-    }
 
-    @ViewBuilder
-    private var qualityHUDPrefix: some View {
-        HStack(spacing: 5) {
-            Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
-                .font(.caption2)
-                .foregroundStyle(.white.opacity(session.connectionDirect ? 0.95 : 0.55))
-            if !session.connectionSummary.isEmpty {
-                Text(session.connectionSummary)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-            }
-            if !session.qualitySummary.isEmpty {
-                Text(session.qualitySummary)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.9))
-            }
-            if session.isHardDecodeCodec {
-                Text("VT")
-                    .font(.caption2.weight(.bold))
-                    .foregroundStyle(.white)
-            } else if !session.qualityCodec.isEmpty {
-                Text(session.qualityCodec)
+            if !session.lastClipboardNote.isEmpty {
+                Text("·").foregroundStyle(.white.opacity(0.35))
+                Text(session.lastClipboardNote)
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .lineLimit(1)
             }
         }
+        .padding(.horizontal, isCompact ? 10 : 12)
+        .padding(.vertical, isCompact ? 5 : 7)
+        .background(.black.opacity(0.5), in: Capsule())
+        // Rebuild whole capsule on structure change — no partial-layout morph trail.
+        .id(hudStructureKey)
+        .transaction { $0.animation = nil }
     }
 
     // MARK: - Overlays
