@@ -11,10 +11,12 @@
 		36F3B176AA9DF500C7CE2323 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */; };
 		47026AEDDB1362C950C31B4C /* MetalRemoteView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E25021681FF17E8217B4FE70 /* MetalRemoteView.swift */; };
 		5040C25EA9789C4CA17E089B /* RustDeskBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */; };
+		56B79B43E9DD49B58D1FFF5D /* SoftKeyboardHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48DC86EF2C04ABA591743EBE /* SoftKeyboardHost.swift */; };
 		5B451D1FB07E4C1603BBF27B /* JoshuaRustDeskApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FCE93E3AF59BB701EE565D34 /* JoshuaRustDeskApp.swift */; };
 		625245FD03F3604036D3221F /* SessionController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0ADB239B03307893EC752509 /* SessionController.swift */; };
 		6678A26B9D491C29016C8A46 /* RecentPeersStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F58372ED060879D51527201 /* RecentPeersStore.swift */; };
 		98FA0D7DA2DC82B03BF1C7D5 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 118BE4B39E6656C7300D32DD /* SettingsView.swift */; };
+		B03F5F64CBED3A0D4627DC39 /* KeyboardLayoutFixer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EC96CF34EF1E48F7166D2A5 /* KeyboardLayoutFixer.swift */; };
 		B80F1433861479EBF195A495 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */; };
 /* End PBXBuildFile section */
 
@@ -23,10 +25,12 @@
 		118BE4B39E6656C7300D32DD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		3F58372ED060879D51527201 /* RecentPeersStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPeersStore.swift; sourceTree = "<group>"; };
+		48DC86EF2C04ABA591743EBE /* SoftKeyboardHost.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SoftKeyboardHost.swift; sourceTree = "<group>"; };
 		4902E9B60A5D529574454FBE /* JoshuaRustDesk.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = JoshuaRustDesk.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		4F40A717989DC460F5381E73 /* RemoteSessionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteSessionView.swift; sourceTree = "<group>"; };
 		5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustDeskBridge.swift; sourceTree = "<group>"; };
 		6165DEAE3CE6507CF915AE77 /* rustdesk_ios.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = rustdesk_ios.h; sourceTree = "<group>"; };
+		6EC96CF34EF1E48F7166D2A5 /* KeyboardLayoutFixer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLayoutFixer.swift; sourceTree = "<group>"; };
 		7E8DE79BB6BF47DCCCE37ACB /* HomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeView.swift; sourceTree = "<group>"; };
 		9E1FD6B18EBEE35EFF74229B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		C119B4AD7A449750DD761B39 /* JoshuaRustDesk-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "JoshuaRustDesk-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -102,8 +106,10 @@
 		E1FF575B1A9E326C44C9553E /* Remote */ = {
 			isa = PBXGroup;
 			children = (
+				6EC96CF34EF1E48F7166D2A5 /* KeyboardLayoutFixer.swift */,
 				E25021681FF17E8217B4FE70 /* MetalRemoteView.swift */,
 				4F40A717989DC460F5381E73 /* RemoteSessionView.swift */,
+				48DC86EF2C04ABA591743EBE /* SoftKeyboardHost.swift */,
 			);
 			path = Remote;
 			sourceTree = "<group>";
@@ -180,12 +186,14 @@
 				36F3B176AA9DF500C7CE2323 /* AppDelegate.swift in Sources */,
 				B80F1433861479EBF195A495 /* HomeView.swift in Sources */,
 				5B451D1FB07E4C1603BBF27B /* JoshuaRustDeskApp.swift in Sources */,
+				B03F5F64CBED3A0D4627DC39 /* KeyboardLayoutFixer.swift in Sources */,
 				47026AEDDB1362C950C31B4C /* MetalRemoteView.swift in Sources */,
 				6678A26B9D491C29016C8A46 /* RecentPeersStore.swift in Sources */,
 				29C009E2FE8311D79C5A752D /* RemoteSessionView.swift in Sources */,
 				5040C25EA9789C4CA17E089B /* RustDeskBridge.swift in Sources */,
 				625245FD03F3604036D3221F /* SessionController.swift in Sources */,
 				98FA0D7DA2DC82B03BF1C7D5 /* SettingsView.swift in Sources */,
+				56B79B43E9DD49B58D1FFF5D /* SoftKeyboardHost.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

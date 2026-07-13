@@ -442,24 +442,37 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
         if isFirstResponder {
             resignFirstResponder()
         }
-        softField.text = softSentinel
-        softField.isUserInteractionEnabled = true
-        // Delay past the toolbar button's touch sequence (it steals first responder).
+        // Host the field in a secondary UIWindow so UIKit keyboard avoidance
+        // does not shrink the fullScreenCover (sidebar + canvas).
+        let host = SoftKeyboardHost.shared
+        host.onInsert = { [weak self] text in
+            if text == "\n" {
+                // Enter as USB HID 0x28
+                self?.session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+                self?.session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+            } else {
+                self?.session?.inputString(text)
+            }
+        }
+        host.onDelete = { [weak self] in
+            self?.session?.handleKey(character: "", usbHid: 0x2A, down: true)
+            self?.session?.handleKey(character: "", usbHid: 0x2A, down: false)
+        }
+        host.onHide = { [weak self] in
+            guard let self else { return }
+            self.softKeyboardOn = false
+            self.session?.softKeyboardVisible = false
+            self.claimHardwareFocus()
+        }
+        // Delay past the toolbar button's touch sequence.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.softKeyboardOn else { return }
-            let ok = self.softField.becomeFirstResponder()
-            if !ok {
-                // Retry once after layout / presentation settles.
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-                    guard let self, self.softKeyboardOn else { return }
-                    _ = self.softField.becomeFirstResponder()
-                }
-            }
+            host.show(in: self.window?.windowScene)
         }
     }
 
     private func dismissSoftKeyboard() {
-        softField.resignFirstResponder()
+        SoftKeyboardHost.shared.hide(notify: false)
         claimHardwareFocus()
     }
 

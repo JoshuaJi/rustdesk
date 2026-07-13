@@ -87,9 +87,12 @@ struct RemoteSessionView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .ignoresSafeArea(.keyboard)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
-        // Keyboard must float over remote desktop, not push/resize the canvas.
-        .ignoresSafeArea(.keyboard, edges: .bottom)
+        // SwiftUI-level ignore (not sufficient alone for fullScreenCover).
+        .ignoresSafeArea(.keyboard, edges: .all)
+        // UIKit-level: strip hosting-controller keyboard safe area + re-pin frame.
+        .disableKeyboardLayoutShift()
         .statusBarHidden(true)
         .onAppear {
             session.captureSystemShortcuts = true
