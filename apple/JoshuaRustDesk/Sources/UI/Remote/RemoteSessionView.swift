@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Sidecar-inspired remote session chrome: slim leading sidebar + minimal status.
+/// Sidecar-inspired remote session chrome: slim leading sidebar + status/quality HUD.
 struct RemoteSessionView: View {
     @ObservedObject var session: SessionController
     @Binding var isPresented: Bool
@@ -33,17 +33,38 @@ struct RemoteSessionView: View {
             }
             .allowsHitTesting(true)
 
-            // Top-trailing status pill only.
-            VStack {
+            // Top-trailing status + quality HUD.
+            VStack(alignment: .trailing, spacing: 6) {
                 HStack {
                     Spacer()
                     statusPill
                         .padding(.trailing, 12)
                         .padding(.top, 10)
                 }
+                if session.showQualityHUD, session.phase == .connected {
+                    HStack {
+                        Spacer()
+                        qualityPill
+                            .padding(.trailing, 12)
+                    }
+                }
+                if !session.lastClipboardNote.isEmpty {
+                    HStack {
+                        Spacer()
+                        Text(session.lastClipboardNote)
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.9))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(.black.opacity(0.45), in: Capsule())
+                            .padding(.trailing, 12)
+                            .transition(.opacity)
+                    }
+                }
                 Spacer()
             }
             .allowsHitTesting(false)
+            .animation(.easeOut(duration: 0.2), value: session.lastClipboardNote)
 
             if case .needPassword = session.phase {
                 passwordSheet
@@ -107,6 +128,22 @@ struct RemoteSessionView: View {
                 session.pasteFromClipboard()
             }
 
+            // Sticky modifiers (Sidecar)
+            Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
+
+            modButton("⌃", active: session.modControl, label: "Control") {
+                session.toggleControl()
+            }
+            modButton("⌥", active: session.modOption, label: "Option") {
+                session.toggleOption()
+            }
+            modButton("⇧", active: session.modShift, label: "Shift") {
+                session.toggleShift()
+            }
+            modButton("⌘", active: session.modCommand, label: "Command") {
+                session.toggleCommand()
+            }
+
             if sidebarExpanded {
                 Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
 
@@ -130,16 +167,23 @@ struct RemoteSessionView: View {
                 ) {
                     session.cycleQuality()
                 }
+
+                sidebarIconButton(
+                    systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
+                    label: "Quality HUD"
+                ) {
+                    session.showQualityHUD.toggle()
+                }
             }
 
             Spacer(minLength: 8)
 
-            // Connection indicator
+            // Connection path indicator
             Circle()
-                .fill(enableUdpPunch ? Color.green.opacity(0.9) : Color.orange.opacity(0.9))
+                .fill(connectionDotColor)
                 .frame(width: 8, height: 8)
                 .padding(.bottom, 2)
-                .accessibilityLabel(enableUdpPunch ? "UDP punch on" : "Relay")
+                .accessibilityLabel(session.connectionSummary)
 
             sidebarIconButton(
                 systemName: sidebarExpanded ? "chevron.left" : "chevron.right",
@@ -162,6 +206,29 @@ struct RemoteSessionView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
         }
+    }
+
+    private var connectionDotColor: Color {
+        if session.phase != .connected { return .orange.opacity(0.9) }
+        if session.connectionDirect { return .green.opacity(0.9) }
+        return .yellow.opacity(0.9)
+    }
+
+    private func modButton(_ title: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(active ? Color.black : Color.white.opacity(0.92))
+                .frame(width: 40, height: 36)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(active ? Color.accentColor : Color.white.opacity(0.08))
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(active ? .isSelected : [])
+        .help(label)
     }
 
     private func sidebarIconButton(
@@ -190,6 +257,11 @@ struct RemoteSessionView: View {
             Text(session.showRemoteCursor ? "Cursor" : "Touch")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.white.opacity(0.7))
+            if !session.modifiersSummary.isEmpty {
+                Text(session.modifiersSummary)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(Color.accentColor)
+            }
             Text("·")
                 .foregroundStyle(.white.opacity(0.35))
             Text(session.statusText)
@@ -207,6 +279,29 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 7)
         .background(.black.opacity(0.45), in: Capsule())
+    }
+
+    private var qualityPill: some View {
+        HStack(spacing: 6) {
+            Image(systemName: session.connectionDirect ? "bolt.fill" : "arrow.triangle.swap")
+                .font(.caption2)
+                .foregroundStyle(session.connectionDirect ? .green : .yellow)
+            if !session.connectionSummary.isEmpty {
+                Text(session.connectionSummary)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.85))
+            }
+            if !session.qualitySummary.isEmpty {
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text(session.qualitySummary)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(.black.opacity(0.4), in: Capsule())
     }
 
     // MARK: - Overlays

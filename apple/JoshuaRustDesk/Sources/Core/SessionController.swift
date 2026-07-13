@@ -38,6 +38,23 @@ final class SessionController: ObservableObject {
     /// When peer embeds cursor in the video stream, hide our overlay.
     @Published private(set) var cursorEmbedded: Bool = false
 
+    // MARK: Sidecar sticky modifiers
+    @Published var modCommand = false
+    @Published var modOption = false
+    @Published var modControl = false
+    @Published var modShift = false
+
+    // MARK: Connection / quality HUD
+    @Published var connectionSecure = false
+    @Published var connectionDirect = false
+    @Published var streamType = ""
+    @Published var qualitySpeed = ""
+    @Published var qualityFPS = ""
+    @Published var qualityDelay = ""
+    @Published var qualityCodec = ""
+    @Published var showQualityHUD = true
+    @Published var lastClipboardNote = ""
+
     private(set) var sessionUUID: String = ""
     private var active = false
     private var lastPassword: String = ""
@@ -67,6 +84,15 @@ final class SessionController: ObservableObject {
         softKeyboardVisible = false
         viewOnly = false
         didEnsureControlMode = false
+        clearModifiers(sendKeyUp: false)
+        connectionSecure = false
+        connectionDirect = false
+        streamType = ""
+        qualitySpeed = ""
+        qualityFPS = ""
+        qualityDelay = ""
+        qualityCodec = ""
+        lastClipboardNote = ""
         resetCursorState()
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
@@ -126,8 +152,10 @@ final class SessionController: ObservableObject {
             releaseRetained()
             return
         }
-        active = false
         softKeyboardVisible = false
+        // Release sticky modifiers on the peer while session is still active.
+        clearModifiers(sendKeyUp: true)
+        active = false
         if !sessionUUID.isEmpty {
             rd_session_close(sessionUUID)
         }
@@ -146,8 +174,35 @@ final class SessionController: ObservableObject {
             updateCursorFromMouseJSON(json)
             return
         }
-        rd_session_send_mouse(sessionUUID, json)
+        // Inject Sidecar sticky modifiers (session_send_mouse checks key presence).
+        let enriched = enrichMouseJSONWithModifiers(json)
+        rd_session_send_mouse(sessionUUID, enriched)
         updateCursorFromMouseJSON(json)
+    }
+
+    /// Add alt/ctrl/shift/command keys when sticky modifiers are on.
+    private func enrichMouseJSONWithModifiers(_ json: String) -> String {
+        guard modCommand || modOption || modControl || modShift else { return json }
+        guard let data = json.data(using: .utf8),
+              var obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return json }
+        // Values must be strings — Rust parses HashMap<String, String>.
+        if modCommand { obj["command"] = "true" }
+        if modOption { obj["alt"] = "true" }
+        if modControl { obj["ctrl"] = "true" }
+        if modShift { obj["shift"] = "true" }
+        // Coerce all values to strings for the Rust ABI.
+        var strMap: [String: String] = [:]
+        for (k, v) in obj {
+            if let s = v as? String { strMap[k] = s }
+            else if let i = v as? Int { strMap[k] = "\(i)" }
+            else if let b = v as? Bool { strMap[k] = b ? "true" : "false" }
+            else { strMap[k] = "\(v)" }
+        }
+        guard let out = try? JSONSerialization.data(withJSONObject: strMap),
+              let s = String(data: out, encoding: .utf8)
+        else { return json }
+        return s
     }
 
     private func updateCursorFromMouseJSON(_ json: String) {
@@ -209,10 +264,76 @@ final class SessionController: ObservableObject {
     func pasteFromClipboard() {
         guard let text = UIPasteboard.general.string, !text.isEmpty else {
             statusText = "Clipboard empty"
+            lastClipboardNote = "Clipboard empty"
             return
         }
         inputString(text)
         statusText = "Pasted \(text.count) chars"
+        lastClipboardNote = "Pasted \(min(text.count, 999)) chars"
+    }
+
+    // MARK: - Sticky modifiers (Sidecar-style)
+
+    /// USB HID left-modifier usages.
+    private enum ModHID {
+        static let control = 0xE0
+        static let shift = 0xE1
+        static let option = 0xE2
+        static let command = 0xE3
+    }
+
+    func toggleCommand() { toggleModifier(\.modCommand, hid: ModHID.command, name: "⌘") }
+    func toggleOption() { toggleModifier(\.modOption, hid: ModHID.option, name: "⌥") }
+    func toggleControl() { toggleModifier(\.modControl, hid: ModHID.control, name: "⌃") }
+    func toggleShift() { toggleModifier(\.modShift, hid: ModHID.shift, name: "⇧") }
+
+    private func toggleModifier(_ keyPath: ReferenceWritableKeyPath<SessionController, Bool>, hid: Int, name: String) {
+        let next = !self[keyPath: keyPath]
+        self[keyPath: keyPath] = next
+        // Hold the modifier on the peer while sticky is on.
+        handleKey(character: "", usbHid: hid, down: next)
+        statusText = next ? "\(name) on" : "\(name) off"
+    }
+
+    private func clearModifiers(sendKeyUp: Bool) {
+        if sendKeyUp, active {
+            if modCommand { handleKey(character: "", usbHid: ModHID.command, down: false) }
+            if modOption { handleKey(character: "", usbHid: ModHID.option, down: false) }
+            if modControl { handleKey(character: "", usbHid: ModHID.control, down: false) }
+            if modShift { handleKey(character: "", usbHid: ModHID.shift, down: false) }
+        }
+        modCommand = false
+        modOption = false
+        modControl = false
+        modShift = false
+    }
+
+    var modifiersSummary: String {
+        var parts: [String] = []
+        if modControl { parts.append("⌃") }
+        if modOption { parts.append("⌥") }
+        if modShift { parts.append("⇧") }
+        if modCommand { parts.append("⌘") }
+        return parts.isEmpty ? "" : parts.joined()
+    }
+
+    var connectionSummary: String {
+        if phase != .connected && phase != .connecting { return "" }
+        var bits: [String] = []
+        if connectionDirect { bits.append("Direct") }
+        else if phase == .connected { bits.append("Relay") }
+        if connectionSecure { bits.append("Secure") }
+        if !streamType.isEmpty { bits.append(streamType) }
+        return bits.joined(separator: " · ")
+    }
+
+    var qualitySummary: String {
+        var bits: [String] = []
+        if !qualityDelay.isEmpty { bits.append("\(qualityDelay) ms") }
+        if !qualityFPS.isEmpty { bits.append("\(qualityFPS) fps") }
+        if !qualitySpeed.isEmpty { bits.append(qualitySpeed) }
+        if !qualityCodec.isEmpty { bits.append(qualityCodec) }
+        return bits.joined(separator: " · ")
     }
 
     // MARK: - Session options
@@ -309,7 +430,7 @@ final class SessionController: ObservableObject {
         ]
         if let data = try? JSONSerialization.data(withJSONObject: map),
            let json = String(data: data, encoding: .utf8) {
-            rd_session_send_mouse(sessionUUID, json)
+            sendMouseJSON(json)
         }
     }
 
@@ -326,7 +447,7 @@ final class SessionController: ObservableObject {
             ]
             if let data = try? JSONSerialization.data(withJSONObject: map),
                let json = String(data: data, encoding: .utf8) {
-                rd_session_send_mouse(sessionUUID, json)
+                sendMouseJSON(json) // includes sticky modifiers
             }
         }
     }
@@ -341,7 +462,7 @@ final class SessionController: ObservableObject {
         ]
         if let data = try? JSONSerialization.data(withJSONObject: map),
            let json = String(data: data, encoding: .utf8) {
-            rd_session_send_mouse(sessionUUID, json)
+            sendMouseJSON(json)
         }
     }
 
@@ -468,8 +589,19 @@ final class SessionController: ObservableObject {
             statusText = text
         case "connection_ready", "success":
             phase = .connected
-            statusText = "Connected"
+            if let s = stringValue(obj["secure"]) {
+                connectionSecure = s == "true" || s == "1"
+            }
+            if let d = stringValue(obj["direct"]) {
+                connectionDirect = d == "true" || d == "1"
+            }
+            streamType = stringValue(obj["stream_type"]) ?? streamType
+            statusText = connectionSummary.isEmpty ? "Connected" : "Connected · \(connectionSummary)"
             refreshToggleState()
+        case "update_quality_status":
+            handleQualityStatus(obj)
+        case "clipboard":
+            handlePeerClipboard(obj)
         case "cursor_data":
             handleCursorData(obj)
         case "cursor_id":
@@ -482,13 +614,38 @@ final class SessionController: ObservableObject {
             }
             if let w = intValue(obj["width"]), w > 0 { displayWidth = w }
             if let h = intValue(obj["height"]), h > 0 { displayHeight = h }
-        case "permission", "clipboard":
+        case "permission", "fingerprint":
             break
         default:
             if phase == .connecting {
                 statusText = name.isEmpty ? raw : name
             }
         }
+    }
+
+    private func handleQualityStatus(_ obj: [String: Any]) {
+        if let s = stringValue(obj["speed"]), !s.isEmpty { qualitySpeed = s }
+        if let d = stringValue(obj["delay"]), !d.isEmpty { qualityDelay = d }
+        if let c = stringValue(obj["codec_format"]), !c.isEmpty { qualityCodec = c }
+        // fps is a JSON object map display→fps, or a plain number string.
+        if let fpsRaw = stringValue(obj["fps"]), !fpsRaw.isEmpty {
+            if let data = fpsRaw.data(using: .utf8),
+               let map = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                // Prefer display 0 / first value.
+                if let v = map["0"] ?? map.values.first {
+                    qualityFPS = stringValue(v) ?? "\(v)"
+                }
+            } else {
+                qualityFPS = fpsRaw
+            }
+        }
+    }
+
+    private func handlePeerClipboard(_ obj: [String: Any]) {
+        guard let content = stringValue(obj["content"]), !content.isEmpty else { return }
+        UIPasteboard.general.string = content
+        lastClipboardNote = "Copied \(min(content.count, 999)) chars from peer"
+        // Don't stomp statusText if user is mid-action; brief note is enough.
     }
 
     // MARK: - Cursor events
