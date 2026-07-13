@@ -24,7 +24,9 @@ targets:
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.joshuaji.rustdesk
+        PRODUCT_NAME: RustDesk
         INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_OBJC_BRIDGING_HEADER: Bridging/JoshuaRustDesk-Bridging-Header.h
         HEADER_SEARCH_PATHS:
           - $(SRCROOT)/Bridging

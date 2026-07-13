@@ -19,13 +19,20 @@
 	<key>CFBundleShortVersionString</key>
 	<string>1.5.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<!-- Pure Swift client replaces Flutter Runner under the same bundle id. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>RustDesk uses the local network to find and connect to nearby devices.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_rustdesk._tcp</string>
+	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
