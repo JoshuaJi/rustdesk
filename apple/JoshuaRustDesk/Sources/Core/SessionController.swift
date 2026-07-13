@@ -245,8 +245,8 @@ final class SessionController: ObservableObject {
         rd_session_toggle_option(sessionUUID, "show-remote-cursor")
         applyCursorModeFromPeer()
         statusText = showRemoteCursor
-            ? "Cursor mode — drag moves pointer, tap clicks"
-            : "Touch mode — finger is the pointer"
+            ? "Cursor mode"
+            : "Touch mode"
     }
 
     func refreshToggleState() {

@@ -1,17 +1,17 @@
 import SwiftUI
 
+/// Sidecar-inspired remote session chrome: slim leading sidebar + minimal status.
 struct RemoteSessionView: View {
     @ObservedObject var session: SessionController
     @Binding var isPresented: Bool
     @State private var password = ""
-    @State private var toolbarExpanded = true
+    @State private var sidebarExpanded = true
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
-            // Full-bleed canvas — must remain the primary hit target for mouse/touch.
             MetalRemoteView(
                 session: session,
                 onSize: { size in
@@ -23,36 +23,40 @@ struct RemoteSessionView: View {
                 }
             )
             .ignoresSafeArea()
-            // Overlays attach only to chrome edges so the canvas keeps receiving taps.
-            .overlay(alignment: .top) {
-                topBar
-                    .padding(.horizontal, 10)
-                    .padding(.top, 8)
+
+            // Sidecar-style leading sidebar (does not cover the canvas center).
+            HStack(spacing: 0) {
+                sidecarSidebar
+                    .padding(.leading, 8)
+                    .padding(.vertical, 12)
+                Spacer(minLength: 0).allowsHitTesting(false)
             }
-            .overlay(alignment: .bottom) {
-                Group {
-                    if toolbarExpanded {
-                        bottomBar
-                            .padding(.horizontal, 10)
-                            .padding(.bottom, 8)
-                    }
+            .allowsHitTesting(true)
+
+            // Top-trailing status pill only.
+            VStack {
+                HStack {
+                    Spacer()
+                    statusPill
+                        .padding(.trailing, 12)
+                        .padding(.top, 10)
                 }
+                Spacer()
             }
+            .allowsHitTesting(false)
 
             if case .needPassword = session.phase {
                 passwordSheet
             }
-
             if case .failed(let msg) = session.phase {
                 failureOverlay(msg)
             }
-
             if session.phase == .connecting {
                 ProgressView("Connecting…")
                     .tint(.white)
                     .foregroundStyle(.white)
-                    .padding()
-                    .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(16)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
                     .allowsHitTesting(false)
             }
         }
@@ -65,134 +69,144 @@ struct RemoteSessionView: View {
         }
     }
 
-    // MARK: - Toolbar
+    // MARK: - Sidecar sidebar
 
-    private var topBar: some View {
-        HStack(spacing: 8) {
-            chipButton(icon: "xmark", label: "Close") {
+    private var sidecarSidebar: some View {
+        VStack(spacing: 6) {
+            sidebarIconButton(
+                systemName: "xmark",
+                label: "Disconnect"
+            ) {
                 session.close()
                 isPresented = false
             }
 
-            Spacer().allowsHitTesting(false)
+            Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
 
-            Text(session.statusText)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.white)
-                .lineLimit(1)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(.black.opacity(0.45), in: Capsule())
-                .allowsHitTesting(false)
-
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    toolbarExpanded.toggle()
-                }
-            } label: {
-                Image(systemName: toolbarExpanded ? "chevron.up.circle.fill" : "chevron.down.circle.fill")
-                    .font(.title3)
-                    .foregroundStyle(.white.opacity(0.9))
-                    .padding(6)
-                    .background(.black.opacity(0.45), in: Circle())
+            sidebarIconButton(
+                systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
+                label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
+                emphasized: true
+            ) {
+                session.toggleRemoteCursor()
             }
-        }
-    }
 
-    private var bottomBar: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                chipButton(
-                    icon: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
-                    label: session.softKeyboardVisible ? "Hide KB" : "Keyboard"
-                ) {
-                    let next = !session.softKeyboardVisible
-                    if next {
-                        session.captureSystemShortcuts = false
-                    }
-                    session.softKeyboardVisible = next
-                }
+            sidebarIconButton(
+                systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
+                label: "Keyboard"
+            ) {
+                let next = !session.softKeyboardVisible
+                if next { session.captureSystemShortcuts = false }
+                session.softKeyboardVisible = next
+            }
 
-                chipButton(
-                    icon: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
-                    label: session.captureSystemShortcuts ? "Shortcuts On" : "Shortcuts"
+            sidebarIconButton(
+                systemName: "doc.on.clipboard",
+                label: "Paste"
+            ) {
+                session.pasteFromClipboard()
+            }
+
+            if sidebarExpanded {
+                Divider().frame(width: 28).overlay(Color.white.opacity(0.25))
+
+                sidebarIconButton(
+                    systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
+                    label: "Shortcuts"
                 ) {
                     session.captureSystemShortcuts.toggle()
                 }
 
-                chipButton(icon: "doc.on.clipboard", label: "Paste") {
-                    session.pasteFromClipboard()
-                }
-
-                chipButton(icon: "sparkles.tv", label: session.qualityLabel) {
-                    session.cycleQuality()
-                }
-            }
-
-            HStack(spacing: 8) {
-                chipButton(
-                    icon: session.viewOnly ? "eye.fill" : "hand.tap",
+                sidebarIconButton(
+                    systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
                     label: session.viewOnly ? "View only" : "Control"
                 ) {
                     session.toggleViewOnly()
                 }
 
-                chipButton(
-                    icon: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.draw",
-                    label: session.showRemoteCursor ? "Cursor mode" : "Touch mode"
+                sidebarIconButton(
+                    systemName: "sparkles.tv",
+                    label: session.qualityLabel
                 ) {
-                    session.toggleRemoteCursor()
-                }
-
-                punchChip
-
-                Spacer(minLength: 0).allowsHitTesting(false)
-
-                if session.displayWidth > 0 {
-                    Text("\(session.displayWidth)×\(session.displayHeight)")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.85))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 6)
-                        .background(.black.opacity(0.4), in: Capsule())
-                        .allowsHitTesting(false)
+                    session.cycleQuality()
                 }
             }
-        }
-        .padding(8)
-        .background(.ultraThinMaterial.opacity(0.85), in: RoundedRectangle(cornerRadius: 14))
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
 
-    private var punchChip: some View {
-        HStack(spacing: 4) {
+            Spacer(minLength: 8)
+
+            // Connection indicator
             Circle()
-                .fill(enableUdpPunch ? Color.green : Color.orange)
-                .frame(width: 7, height: 7)
-            Text(enableUdpPunch ? "UDP punch" : "TCP/relay")
-                .font(.caption2)
-                .foregroundStyle(.white)
+                .fill(enableUdpPunch ? Color.green.opacity(0.9) : Color.orange.opacity(0.9))
+                .frame(width: 8, height: 8)
+                .padding(.bottom, 2)
+                .accessibilityLabel(enableUdpPunch ? "UDP punch on" : "Relay")
+
+            sidebarIconButton(
+                systemName: sidebarExpanded ? "chevron.left" : "chevron.right",
+                label: sidebarExpanded ? "Collapse" : "Expand"
+            ) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    sidebarExpanded.toggle()
+                }
+            }
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-        .background(.black.opacity(0.4), in: Capsule())
-        .allowsHitTesting(false)
-        .accessibilityLabel(enableUdpPunch ? "UDP hole punch enabled" : "UDP hole punch disabled")
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .frame(width: 52)
+        .background {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        }
     }
 
-    private func chipButton(icon: String, label: String, action: @escaping () -> Void) -> some View {
+    private func sidebarIconButton(
+        systemName: String,
+        label: String,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                Text(label)
-                    .font(.caption.weight(.semibold))
-            }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(.black.opacity(0.5), in: Capsule())
+            Image(systemName: systemName)
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(emphasized ? Color.accentColor : Color.white.opacity(0.92))
+                .frame(width: 40, height: 40)
+                .background(
+                    Circle()
+                        .fill(Color.white.opacity(emphasized ? 0.16 : 0.08))
+                )
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: 6) {
+            Text(session.showRemoteCursor ? "Cursor" : "Touch")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white.opacity(0.7))
+            Text("·")
+                .foregroundStyle(.white.opacity(0.35))
+            Text(session.statusText)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+            if session.displayWidth > 0 {
+                Text("·")
+                    .foregroundStyle(.white.opacity(0.35))
+                Text("\(session.displayWidth)×\(session.displayHeight)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.75))
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(.black.opacity(0.45), in: Capsule())
     }
 
     // MARK: - Overlays
