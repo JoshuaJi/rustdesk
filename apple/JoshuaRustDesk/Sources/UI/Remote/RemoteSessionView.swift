@@ -98,7 +98,12 @@ struct RemoteSessionView: View {
                 icon: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
                 label: session.softKeyboardVisible ? "Hide KB" : "Keyboard"
             ) {
-                session.softKeyboardVisible.toggle()
+                // Toggle off capture briefly when opening soft KB so iOS text input wins.
+                let next = !session.softKeyboardVisible
+                if next {
+                    session.captureSystemShortcuts = false
+                }
+                session.softKeyboardVisible = next
             }
 
             chipButton(

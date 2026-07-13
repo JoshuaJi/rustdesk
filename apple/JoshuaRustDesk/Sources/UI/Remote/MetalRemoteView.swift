@@ -184,7 +184,7 @@ struct MetalRemoteView: UIViewRepresentable {
 
 // MARK: - Touch + keyboard first-responder view
 
-final class TouchMetalView: MTKView, UIKeyInput {
+final class TouchMetalView: MTKView, UITextFieldDelegate {
     weak var coordinator: MetalRemoteView.Coordinator?
     weak var session: SessionController?
 
@@ -192,7 +192,8 @@ final class TouchMetalView: MTKView, UIKeyInput {
         didSet {
             if oldValue != captureSystemShortcuts {
                 cachedPriorityCommands = nil
-                refreshFirstResponder()
+                // Only refresh HW first-responder when soft keyboard is off.
+                if !softKeyboardOn { refreshHardwareFirstResponder() }
             }
         }
     }
@@ -203,11 +204,14 @@ final class TouchMetalView: MTKView, UIKeyInput {
     private var panOffset: CGPoint = .zero
 
     private var softKeyboardOn = false
-    private var blankInputView: UIView = {
-        let v = UIView(frame: .zero)
-        v.isUserInteractionEnabled = false
-        return v
-    }()
+    /// Hidden field that actually owns the system soft keyboard (MTKView + UIKeyInput is unreliable).
+    private let softField = UITextField(frame: .zero)
+    /// Keeps the field non-empty so Backspace always fires `shouldChangeCharactersIn`.
+    private let softSentinel = "\u{200B}" // zero-width space
+    private var keyboardObservers: [NSObjectProtocol] = []
+
+    /// Suppresses HW presses path while soft field is editing (text field handles it).
+    private var softKeyboardOnPublic: Bool { softKeyboardOn }
 
     private var cachedPriorityCommands: [UIKeyCommand]?
     private var activeTouches: [UITouch: CGPoint] = [:]
@@ -219,27 +223,138 @@ final class TouchMetalView: MTKView, UIKeyInput {
     private var pinchStartDistance: CGFloat = 0
     private var wheelAccumulator: CGFloat = 0
 
+    // MARK: Setup
+
+    override init(frame frameRect: CGRect, device: MTLDevice?) {
+        super.init(frame: frameRect, device: device)
+        setupSoftField()
+        setupKeyboardNotifications()
+    }
+
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+        setupSoftField()
+        setupKeyboardNotifications()
+    }
+
+    deinit {
+        keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    }
+
+    private func setupSoftField() {
+        softField.delegate = self
+        softField.autocorrectionType = .no
+        softField.autocapitalizationType = .none
+        softField.spellCheckingType = .no
+        softField.smartDashesType = .no
+        softField.smartQuotesType = .no
+        softField.smartInsertDeleteType = .no
+        softField.keyboardType = .default
+        softField.returnKeyType = .default
+        softField.textContentType = nil
+        softField.isSecureTextEntry = false
+        // Nearly invisible but still part of the hierarchy (zero-size can block keyboard).
+        softField.alpha = 0.01
+        softField.tintColor = .clear
+        softField.textColor = .clear
+        softField.backgroundColor = .clear
+        softField.isHidden = false
+        softField.text = softSentinel
+        softField.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(softField)
+        NSLayoutConstraint.activate([
+            softField.widthAnchor.constraint(equalToConstant: 1),
+            softField.heightAnchor.constraint(equalToConstant: 1),
+            softField.leadingAnchor.constraint(equalTo: leadingAnchor),
+            softField.topAnchor.constraint(equalTo: topAnchor),
+        ])
+    }
+
+    private func setupKeyboardNotifications() {
+        let nc = NotificationCenter.default
+        keyboardObservers.append(nc.addObserver(
+            forName: UIResponder.keyboardWillHideNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            guard let self, self.softKeyboardOn else { return }
+            // User dismissed keyboard (or HW keyboard took over) — sync toolbar state.
+            // Delay slightly so our own hide path can set softKeyboardOn first.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                guard let self, self.softKeyboardOn, !self.softField.isFirstResponder else { return }
+                self.softKeyboardOn = false
+                self.session?.softKeyboardVisible = false
+                self.claimHardwareFocus()
+            }
+        })
+    }
+
     // MARK: First responder / soft keyboard
 
-    override var canBecomeFirstResponder: Bool { true }
+    /// Hardware keys (BT / Magic Keyboard) when soft keyboard is hidden.
+    override var canBecomeFirstResponder: Bool { !softKeyboardOn }
 
+    /// Empty input view so claiming first responder does not pop the soft keyboard.
     override var inputView: UIView? {
-        softKeyboardOn ? nil : blankInputView
+        let v = UIView(frame: .zero)
+        v.backgroundColor = .clear
+        return v
     }
 
     func setSoftKeyboard(_ on: Bool) {
-        guard softKeyboardOn != on else {
-            if on, !isFirstResponder { _ = becomeFirstResponder() }
+        if on == softKeyboardOn {
+            if on, !softField.isFirstResponder {
+                presentSoftKeyboard()
+            }
             return
         }
         softKeyboardOn = on
-        if !isFirstResponder {
-            _ = becomeFirstResponder()
+        if on {
+            // Soft keyboard needs normal text input — pause shortcut stealing.
+            if session?.captureSystemShortcuts == true {
+                // Keep published flag; just avoid fighting while typing.
+            }
+            presentSoftKeyboard()
+        } else {
+            dismissSoftKeyboard()
         }
-        reloadInputViews()
     }
 
-    private func refreshFirstResponder() {
+    private func presentSoftKeyboard() {
+        // Drop metal first-responder so the text field can take keyboard focus.
+        if isFirstResponder {
+            resignFirstResponder()
+        }
+        softField.text = softSentinel
+        softField.isUserInteractionEnabled = true
+        // Delay past the toolbar button's touch sequence (it steals first responder).
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.softKeyboardOn else { return }
+            let ok = self.softField.becomeFirstResponder()
+            if !ok {
+                // Retry once after layout / presentation settles.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    guard let self, self.softKeyboardOn else { return }
+                    _ = self.softField.becomeFirstResponder()
+                }
+            }
+        }
+    }
+
+    private func dismissSoftKeyboard() {
+        softField.resignFirstResponder()
+        claimHardwareFocus()
+    }
+
+    private func claimHardwareFocus() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, !self.softKeyboardOn else { return }
+            _ = self.becomeFirstResponder()
+        }
+    }
+
+    private func refreshHardwareFirstResponder() {
+        guard !softKeyboardOn else { return }
         if isFirstResponder {
             resignFirstResponder()
             _ = becomeFirstResponder()
@@ -248,39 +363,61 @@ final class TouchMetalView: MTKView, UIKeyInput {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil {
-            DispatchQueue.main.async { [weak self] in
-                _ = self?.becomeFirstResponder()
-            }
+        if window != nil, !softKeyboardOn {
+            claimHardwareFocus()
         }
     }
 
-    // MARK: UIKeyInput (soft keyboard)
+    // MARK: UITextFieldDelegate (soft keyboard text path)
 
-    var hasText: Bool { true }
-
-    func insertText(_ text: String) {
-        session?.inputString(text)
+    func textField(
+        _ textField: UITextField,
+        shouldChangeCharactersIn range: NSRange,
+        replacementString string: String
+    ) -> Bool {
+        if string.isEmpty {
+            // Backspace / delete
+            session?.handleKey(character: "", usbHid: 0x2A, down: true)
+            session?.handleKey(character: "", usbHid: 0x2A, down: false)
+        } else if string == "\n" {
+            // Return key (some layouts deliver via shouldChange)
+            session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+            session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+        } else {
+            session?.inputString(string)
+        }
+        // Keep sentinel so the field never goes empty.
+        textField.text = softSentinel
+        return false
     }
 
-    func deleteBackward() {
-        // USB HID Backspace = 0x2A
-        session?.handleKey(character: "", usbHid: 0x2A, down: true)
-        session?.handleKey(character: "", usbHid: 0x2A, down: false)
+    func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+        session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+        session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+        textField.text = softSentinel
+        return false
     }
 
     // MARK: Hardware key presses
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        // Soft field is editing: let the text system handle (IME, etc.).
+        if softKeyboardOn, softField.isFirstResponder {
+            super.pressesBegan(presses, with: event)
+            return
+        }
         if captureSystemShortcuts || !softKeyboardOn {
             handlePresses(presses, down: true)
-            // Skip super to avoid double-delivery / system handling where possible.
             return
         }
         super.pressesBegan(presses, with: event)
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if softKeyboardOn, softField.isFirstResponder {
+            super.pressesEnded(presses, with: event)
+            return
+        }
         if captureSystemShortcuts || !softKeyboardOn {
             handlePresses(presses, down: false)
             return
@@ -289,6 +426,10 @@ final class TouchMetalView: MTKView, UIKeyInput {
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if softKeyboardOn, softField.isFirstResponder {
+            super.pressesCancelled(presses, with: event)
+            return
+        }
         if captureSystemShortcuts || !softKeyboardOn {
             handlePresses(presses, down: false)
             return
@@ -410,7 +551,10 @@ final class TouchMetalView: MTKView, UIKeyInput {
     // MARK: Touches
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        _ = becomeFirstResponder()
+        // Never steal focus while the soft keyboard field is active — that dismisses it.
+        if !softKeyboardOn {
+            _ = becomeFirstResponder()
+        }
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
