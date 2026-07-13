@@ -20,28 +20,26 @@ struct RemoteSessionView: View {
     /// Phone landscape: short height — keep advanced tools collapsed.
     private var isShortHeight: Bool { vSize == .compact }
 
+    /// Same rail width as iPad — one clean column of 40pt controls.
     private var sidebarWidth: CGFloat {
         if railHidden { return 0 }
-        return isCompact ? 52 : 56
+        return 56
     }
 
     var body: some View {
         GeometryReader { geo in
-            let leadingSafe = geo.safeAreaInsets.leading
-            let trailingSafe = geo.safeAreaInsets.trailing
             let bottomSafe = geo.safeAreaInsets.bottom
             let topSafe = geo.safeAreaInsets.top
 
             HStack(spacing: 0) {
                 if !railHidden {
-                    sidecarSidebar(bottomInset: max(bottomSafe, 8), topInset: max(topSafe, 4))
-                        .frame(width: sidebarWidth + (isCompact ? leadingSafe : 0))
-                        .padding(.leading, isCompact ? leadingSafe : 0)
+                    sidecarSidebar(bottomInset: max(bottomSafe, 10), topInset: isCompact ? 8 : max(topSafe, 8))
+                        .frame(width: sidebarWidth)
                         .frame(maxHeight: .infinity)
                         .background(Color.black.opacity(0.92))
                 }
 
-                // Canvas + HUD. On iPhone: edge-to-edge video with floating status.
+                // Canvas + HUD. On iPhone: full canvas with floating status.
                 ZStack {
                     MetalRemoteView(
                         session: session,
@@ -61,7 +59,6 @@ struct RemoteSessionView: View {
 
                     VStack(spacing: 0) {
                         if isCompact {
-                            // Floating status only — no reserved top bar, no drawer button.
                             HStack(spacing: 8) {
                                 Spacer(minLength: 0)
                                 statusPill
@@ -70,7 +67,7 @@ struct RemoteSessionView: View {
                                 }
                             }
                             .padding(.horizontal, 10)
-                            .padding(.top, max(topSafe, 6))
+                            .padding(.top, 8)
                             .allowsHitTesting(false)
                         } else {
                             topChromeIPad
@@ -80,7 +77,6 @@ struct RemoteSessionView: View {
 
                     if railHidden {
                         railRevealTab
-                            .padding(.top, isCompact ? max(topSafe, 8) : 0)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                     }
 
@@ -105,33 +101,26 @@ struct RemoteSessionView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
-        // Phone remote: edge-to-edge. Keyboard still ignored separately.
-        .ignoresSafeArea(isCompact ? .container : [], edges: isCompact ? .all : [])
         .ignoresSafeArea(.keyboard, edges: .all)
         .disableKeyboardLayoutShift()
         .statusBarHidden(true)
         .onAppear {
             session.captureSystemShortcuts = true
-            // Phone: start rail hidden for max canvas; chevron reopens it.
-            if isCompact {
+            // Phone: rail visible, advanced tools in ⋯ panel (not a broken 2×2 rail).
+            if isCompact || isShortHeight {
                 sidebarExpanded = false
-                railHidden = true
-            } else if isShortHeight {
-                sidebarExpanded = false
+                railHidden = false
+                showToolsPanel = false
             }
         }
         .onChange(of: session.softKeyboardVisible) { visible in
-            if visible, isCompact {
-                sidebarExpanded = false
-            }
-        }
-        .onChange(of: hSize) { _ in
-            if isCompact || isShortHeight {
-                sidebarExpanded = false
+            if visible {
+                showToolsPanel = false
             }
         }
         .onDisappear {
             session.softKeyboardVisible = false
+            showToolsPanel = false
         }
     }
 
@@ -182,26 +171,22 @@ struct RemoteSessionView: View {
         .accessibilityLabel("Show toolbar")
     }
 
-    // MARK: - Sidecar sidebar
+    // MARK: - Sidecar sidebar (single column, same on phone & iPad)
 
     private func sidecarSidebar(bottomInset: CGFloat, topInset: CGFloat) -> some View {
         VStack(spacing: 0) {
-            // Sticky disconnect
-            sidebarIconButton(
-                systemName: "xmark",
-                label: "Disconnect"
-            ) {
+            sidebarIconButton(systemName: "xmark", label: "Disconnect") {
                 session.close()
                 isPresented = false
             }
-            .padding(.top, max(topInset, 8))
-            .padding(.bottom, 4)
+            .padding(.top, topInset)
+            .padding(.bottom, 6)
 
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
-                .padding(.bottom, 4)
+                .padding(.bottom, 6)
 
             ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: isCompact ? 5 : 6) {
+                VStack(spacing: 6) {
                     sidebarIconButton(
                         systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
                         label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
@@ -219,14 +204,13 @@ struct RemoteSessionView: View {
                         session.softKeyboardVisible = next
                     }
 
-                    // Tap → clipboard push; long-press → type as keystrokes.
                     Button {
                         session.pasteFromClipboard()
                     } label: {
                         Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: isCompact ? 16 : 17, weight: .semibold))
+                            .font(.system(size: 17, weight: .semibold))
                             .foregroundStyle(Color.white.opacity(0.92))
-                            .frame(width: hit, height: hit)
+                            .frame(width: 40, height: 40)
                             .background(Circle().fill(Color.white.opacity(0.08)))
                     }
                     .buttonStyle(.plain)
@@ -250,43 +234,23 @@ struct RemoteSessionView: View {
 
                     Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
-                    // Modifier keys — 2×2 on compact to save height.
-                    if isCompact {
-                        VStack(spacing: 5) {
-                            HStack(spacing: 4) {
-                                modButton("⌃", active: session.modControl, label: "Control") {
-                                    session.toggleControl()
-                                }
-                                modButton("⌥", active: session.modOption, label: "Option") {
-                                    session.toggleOption()
-                                }
-                            }
-                            HStack(spacing: 4) {
-                                modButton("⇧", active: session.modShift, label: "Shift") {
-                                    session.toggleShift()
-                                }
-                                modButton("⌘", active: session.modCommand, label: "Command") {
-                                    session.toggleCommand()
-                                }
-                            }
-                        }
-                    } else {
-                        modButton("⌃", active: session.modControl, label: "Control") {
-                            session.toggleControl()
-                        }
-                        modButton("⌥", active: session.modOption, label: "Option") {
-                            session.toggleOption()
-                        }
-                        modButton("⇧", active: session.modShift, label: "Shift") {
-                            session.toggleShift()
-                        }
-                        modButton("⌘", active: session.modCommand, label: "Command") {
-                            session.toggleCommand()
-                        }
+                    modButton("⌃", active: session.modControl, label: "Control") {
+                        session.toggleControl()
+                    }
+                    modButton("⌥", active: session.modOption, label: "Option") {
+                        session.toggleOption()
+                    }
+                    modButton("⇧", active: session.modShift, label: "Shift") {
+                        session.toggleShift()
+                    }
+                    modButton("⌘", active: session.modCommand, label: "Command") {
+                        session.toggleCommand()
                     }
 
+                    Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+
                     if isCompact {
-                        // Custom panel — SwiftUI Menu does not receive taps under overFullScreen.
+                        // ⋯ opens tappable panel (Menu is dead under overFullScreen).
                         sidebarIconButton(
                             systemName: showToolsPanel ? "ellipsis.circle.fill" : "ellipsis.circle",
                             label: "More tools",
@@ -297,18 +261,13 @@ struct RemoteSessionView: View {
                             }
                         }
                     } else if sidebarExpanded {
-                        Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
                         advancedToolButtons
                     }
-
-                    // Spacer inside scroll so footer still reachable after short content
-                    Color.clear.frame(height: 8)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
             }
 
-            // Sticky footer: status + collapse / hide rail
             VStack(spacing: 6) {
                 Circle()
                     .fill(connectionDotColor)
@@ -324,9 +283,7 @@ struct RemoteSessionView: View {
                             sidebarExpanded.toggle()
                         }
                     }
-                }
-
-                if isCompact {
+                } else {
                     sidebarIconButton(
                         systemName: "sidebar.leading",
                         label: "Hide toolbar"
@@ -339,9 +296,9 @@ struct RemoteSessionView: View {
                 }
             }
             .padding(.bottom, bottomInset)
-            .padding(.top, 4)
+            .padding(.top, 6)
         }
-        .padding(.horizontal, isCompact ? 4 : 6)
+        .padding(.horizontal, 8)
         .frame(maxHeight: .infinity, alignment: .top)
         .overlay(alignment: .trailing) {
             Rectangle()
@@ -440,8 +397,9 @@ struct RemoteSessionView: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
-            .padding(.leading, railHidden ? 36 : 8)
-            .padding(.top, 72)
+            // Anchor just to the right of the 56pt rail.
+            .padding(.leading, 64)
+            .padding(.top, 56)
             .shadow(color: .black.opacity(0.45), radius: 20, y: 8)
         }
         .transition(.opacity)
@@ -455,7 +413,6 @@ struct RemoteSessionView: View {
     ) -> some View {
         Button {
             action()
-            // Keep panel open for multi-taps (quality cycle); user dismisses via dimmed area.
         } label: {
             HStack(spacing: 14) {
                 Image(systemName: systemName)
@@ -474,8 +431,6 @@ struct RemoteSessionView: View {
         .buttonStyle(.plain)
     }
 
-    private var hit: CGFloat { isCompact ? 44 : 40 }
-
     private var connectionDotColor: Color {
         if session.phase != .connected { return .orange.opacity(0.9) }
         if session.connectionDirect { return .green.opacity(0.95) }
@@ -483,13 +438,11 @@ struct RemoteSessionView: View {
     }
 
     private func modButton(_ title: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
-        let w: CGFloat = isCompact ? 22 : 40
-        let h: CGFloat = isCompact ? 32 : 40
-        return Button(action: action) {
+        Button(action: action) {
             Text(title)
-                .font(.system(size: isCompact ? 12 : 15, weight: .bold, design: .rounded))
+                .font(.system(size: 15, weight: .bold, design: .rounded))
                 .foregroundStyle(active ? Color.black : Color.white.opacity(0.92))
-                .frame(width: w, height: h)
+                .frame(width: 40, height: 36)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(active ? Color.white : Color.white.opacity(0.08))
@@ -509,9 +462,9 @@ struct RemoteSessionView: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: isCompact ? 16 : 17, weight: .semibold))
+                .font(.system(size: 17, weight: .semibold))
                 .foregroundStyle(Color.white.opacity(emphasized ? 1.0 : 0.92))
-                .frame(width: hit, height: hit)
+                .frame(width: 40, height: 40)
                 .background(
                     Circle()
                         .fill(Color.white.opacity(emphasized ? 0.16 : 0.08))
