@@ -851,13 +851,12 @@ impl Decoder {
 pub fn enable_hwcodec_option() -> bool {
     use hbb_common::config::keys::OPTION_ENABLE_HWCODEC;
 
-    if !cfg!(target_os = "ios") {
-        return option2bool(
-            OPTION_ENABLE_HWCODEC,
-            &Config::get_option(OPTION_ENABLE_HWCODEC),
-        );
-    }
-    false
+    // iOS: VideoToolbox H264/H265 decode is available when built with `hwcodec`.
+    // Default is enabled (empty / non-"N" via option2bool for enable-* keys).
+    option2bool(
+        OPTION_ENABLE_HWCODEC,
+        &Config::get_option(OPTION_ENABLE_HWCODEC),
+    )
 }
 #[cfg(feature = "vram")]
 pub fn enable_vram_option(encode: bool) -> bool {

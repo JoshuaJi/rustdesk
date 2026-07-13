@@ -630,7 +630,34 @@ impl HwCodecConfig {
         }
         #[cfg(target_os = "ios")]
         {
-            HwCodecConfig::default()
+            // iOS is a pure client: prefer VideoToolbox hardware decode so the
+            // host can send H.264/H.265 instead of software VP8/VP9.
+            // All modern iPads have VT H264 + HEVC decode.
+            use hwcodec::{
+                common::DataFormat,
+                ffmpeg::AVHWDeviceType,
+                ffmpeg_ram::{CodecInfo, Priority},
+            };
+            let mut ram_decode = vec![CodecInfo {
+                name: "h264".to_owned(),
+                format: DataFormat::H264,
+                hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                priority: Priority::Best as _,
+                ..Default::default()
+            }];
+            // HEVC decode available on A9+ (every currently supported iPad).
+            ram_decode.push(CodecInfo {
+                name: "hevc".to_owned(),
+                format: DataFormat::H265,
+                hwdevice: AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+                priority: Priority::Best as _,
+                ..Default::default()
+            });
+            log::info!("iOS VideoToolbox hw decode: H264+H265 enabled");
+            HwCodecConfig {
+                ram_decode,
+                ..Default::default()
+            }
         }
     }
 

@@ -1119,8 +1119,9 @@ pub fn deploy_device(token: String, new_id: Option<String>) -> DeployResult {
 
 #[inline]
 pub fn has_hwcodec() -> bool {
-    // Has real hardware codec using gpu
-    (cfg!(feature = "hwcodec") && cfg!(not(target_os = "ios"))) || cfg!(feature = "mediacodec")
+    // Real hardware codec (GPU / VideoToolbox / MediaCodec).
+    // iOS uses VideoToolbox via the `hwcodec` feature (see HwCodecConfig for iOS).
+    cfg!(feature = "hwcodec") || cfg!(feature = "mediacodec")
 }
 
 #[inline]
