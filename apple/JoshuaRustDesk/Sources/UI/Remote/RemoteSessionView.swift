@@ -152,6 +152,16 @@ struct RemoteSessionView: View {
             .accessibilityLabel("Paste clipboard to peer")
             .help("Tap: push clipboard · Long-press: type keystrokes")
 
+            if session.hasMultipleDisplays {
+                sidebarIconButton(
+                    systemName: "rectangle.on.rectangle",
+                    label: "Display \(session.displaySummary)",
+                    emphasized: true
+                ) {
+                    session.cycleDisplay()
+                }
+            }
+
             Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
             modButton("⌃", active: session.modControl, label: "Control") {
@@ -296,6 +306,11 @@ struct RemoteSessionView: View {
             if session.displayWidth > 0 {
                 Text("·")
                     .foregroundStyle(.white.opacity(0.35))
+                if session.hasMultipleDisplays {
+                    Text("D\(session.displaySummary)")
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(Color.accentColor.opacity(0.95))
+                }
                 Text("\(session.displayWidth)×\(session.displayHeight)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.white.opacity(0.75))

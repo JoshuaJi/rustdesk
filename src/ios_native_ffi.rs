@@ -206,6 +206,20 @@ pub extern "C" fn rd_session_set_size(
     }
 }
 
+/// Switch the captured remote display (0-based). Soft-renderer path captures
+/// that single display; peer will send switch_display + new frames.
+#[no_mangle]
+pub extern "C" fn rd_session_switch_display(session_uuid: *const c_char, display: c_int) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    if display < 0 {
+        return;
+    }
+    // Desktop remote: is_desktop=true. Routes through session handler display list.
+    flutter::sessions::session_switch_display(true, sid, vec![display]);
+}
+
 #[no_mangle]
 pub extern "C" fn rd_session_send_mouse(session_uuid: *const c_char, json: *const c_char) {
     let Some(sid) = parse_session_id(session_uuid) else {
@@ -403,6 +417,7 @@ pub extern "C" fn rd_force_link() {
         rd_session_refresh_decodings as *const (),
         rd_session_set_codec_preference as *const (),
         rd_session_send_clipboard as *const (),
+        rd_session_switch_display as *const (),
         rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),
     );

@@ -11,6 +11,24 @@ enum SessionPhase: Equatable {
     case closed
 }
 
+/// One remote monitor advertised by the peer.
+struct RemoteDisplayInfo: Identifiable, Equatable {
+    /// 0-based index used by the session / soft RGBA buffer.
+    let id: Int
+    var width: Int
+    var height: Int
+    var x: Int
+    var y: Int
+    var cursorEmbedded: Bool
+
+    var label: String {
+        if width > 0, height > 0 {
+            return "Display \(id + 1) · \(width)×\(height)"
+        }
+        return "Display \(id + 1)"
+    }
+}
+
 /// Owns one remote session: events from Rust, frame notifications, login, input.
 final class SessionController: ObservableObject {
     @Published var phase: SessionPhase = .idle
@@ -20,6 +38,10 @@ final class SessionController: ObservableObject {
     @Published var frameTick: UInt64 = 0
     @Published var displayWidth: Int = 0
     @Published var displayHeight: Int = 0
+    /// All peer monitors (empty until peer_info).
+    @Published var displays: [RemoteDisplayInfo] = []
+    /// Currently captured / shown display index.
+    @Published var currentDisplayIndex: Int = 0
     /// Soft-keyboard toggle (bound by toolbar / Metal view).
     @Published var softKeyboardVisible: Bool = false
     /// Steal iPadOS system shortcuts (⌘C etc.) when possible.
@@ -104,6 +126,10 @@ final class SessionController: ObservableObject {
         lastClipboardNote = ""
         lastPushedClipboard = ""
         lastReceivedClipboard = ""
+        displays = []
+        currentDisplayIndex = 0
+        displayWidth = 0
+        displayHeight = 0
         resetCursorState()
         startPasteboardObserver()
 
@@ -233,7 +259,45 @@ final class SessionController: ObservableObject {
 
     func setViewSize(width: Int, height: Int) {
         guard active, width > 0, height > 0 else { return }
-        rd_session_set_size(sessionUUID, 0, width, height)
+        let display = max(0, currentDisplayIndex)
+        rd_session_set_size(sessionUUID, display, width, height)
+    }
+
+    // MARK: - Multi-display
+
+    var hasMultipleDisplays: Bool { displays.count > 1 }
+
+    var displaySummary: String {
+        guard !displays.isEmpty else { return "" }
+        return "\(currentDisplayIndex + 1)/\(displays.count)"
+    }
+
+    /// Switch to a peer display by 0-based index.
+    func switchDisplay(to index: Int) {
+        guard active, !displays.isEmpty else { return }
+        let clamped = max(0, min(index, displays.count - 1))
+        currentDisplayIndex = clamped
+        let d = displays[clamped]
+        if d.width > 0 { displayWidth = d.width }
+        if d.height > 0 { displayHeight = d.height }
+        cursorEmbedded = d.cursorEmbedded
+        rd_session_switch_display(sessionUUID, Int32(clamped))
+        statusText = d.label
+        lastClipboardNote = "" // avoid stale note
+        // Reset cursor to center of new display for overlay.
+        if displayWidth > 0, displayHeight > 0 {
+            cursorX = CGFloat(displayWidth) / 2
+            cursorY = CGFloat(displayHeight) / 2
+        }
+    }
+
+    /// Cycle to the next peer display (no-op with a single monitor).
+    func cycleDisplay() {
+        guard hasMultipleDisplays else {
+            statusText = "Single display"
+            return
+        }
+        switchDisplay(to: (currentDisplayIndex + 1) % displays.count)
     }
 
     // MARK: - Keyboard
@@ -549,9 +613,10 @@ final class SessionController: ObservableObject {
     @discardableResult
     func withLatestFrame(_ body: (_ pixels: UnsafeRawPointer, _ width: Int, _ height: Int, _ bytesPerRow: Int) -> Void) -> Bool {
         guard active else { return false }
-        let size = rd_session_get_rgba_size(sessionUUID, 0)
+        let display = max(0, currentDisplayIndex)
+        let size = rd_session_get_rgba_size(sessionUUID, display)
         guard size > 0 else { return false }
-        guard let ptr = rd_session_get_rgba(sessionUUID, 0) else { return false }
+        guard let ptr = rd_session_get_rgba(sessionUUID, display) else { return false }
         var w = displayWidth
         var h = displayHeight
         if w <= 0 || h <= 0 {
@@ -577,24 +642,56 @@ final class SessionController: ObservableObject {
         // Tight BGRA rows (iOS align=1).
         let bpr = w * 4
         body(UnsafeRawPointer(ptr), w, h, bpr)
-        rd_session_next_rgba(sessionUUID, 0)
+        rd_session_next_rgba(sessionUUID, display)
         return true
     }
 
     private func parseDisplays(from obj: [String: Any]) {
-        // displays is a JSON-encoded string array of {width,height,...} (ints as NSNumber).
-        if let displays = obj["displays"] as? String,
-           let ddata = displays.data(using: .utf8),
-           let arr = try? JSONSerialization.jsonObject(with: ddata) as? [[String: Any]],
-           let first = arr.first {
-            if let w = intValue(first["width"]), w > 0 { displayWidth = w }
-            if let h = intValue(first["height"]), h > 0 { displayHeight = h }
-            if let emb = first["cursor_embedded"] {
-                cursorEmbedded = stringValue(emb) == "1" || intValue(emb) == 1
+        // displays is a JSON-encoded string array of {width,height,x,y,...}.
+        var list: [[String: Any]] = []
+        if let displaysStr = obj["displays"] as? String,
+           let ddata = displaysStr.data(using: .utf8),
+           let arr = try? JSONSerialization.jsonObject(with: ddata) as? [[String: Any]] {
+            list = arr
+        } else if let arr = obj["displays"] as? [[String: Any]] {
+            list = arr
+        }
+
+        if !list.isEmpty {
+            displays = list.enumerated().map { idx, d in
+                RemoteDisplayInfo(
+                    id: idx,
+                    width: intValue(d["width"]) ?? 0,
+                    height: intValue(d["height"]) ?? 0,
+                    x: intValue(d["x"]) ?? 0,
+                    y: intValue(d["y"]) ?? 0,
+                    cursorEmbedded: stringValue(d["cursor_embedded"]) == "1"
+                        || intValue(d["cursor_embedded"]) == 1
+                )
             }
-        } else if let arr = obj["displays"] as? [[String: Any]], let first = arr.first {
-            if let w = intValue(first["width"]), w > 0 { displayWidth = w }
-            if let h = intValue(first["height"]), h > 0 { displayHeight = h }
+            let cur = intValue(obj["current_display"]) ?? 0
+            currentDisplayIndex = max(0, min(cur, displays.count - 1))
+            let active = displays[currentDisplayIndex]
+            if active.width > 0 { displayWidth = active.width }
+            if active.height > 0 { displayHeight = active.height }
+            cursorEmbedded = active.cursorEmbedded
+        } else {
+            // Fallback single display from top-level width/height.
+            if displayWidth == 0, let w = intValue(obj["width"]), w > 0 { displayWidth = w }
+            if displayHeight == 0, let h = intValue(obj["height"]), h > 0 { displayHeight = h }
+            if displayWidth > 0, displayHeight > 0, displays.isEmpty {
+                displays = [
+                    RemoteDisplayInfo(
+                        id: 0,
+                        width: displayWidth,
+                        height: displayHeight,
+                        x: 0,
+                        y: 0,
+                        cursorEmbedded: false
+                    )
+                ]
+                currentDisplayIndex = 0
+            }
         }
         if displayWidth == 0, let w = intValue(obj["width"]), w > 0 { displayWidth = w }
         if displayHeight == 0, let h = intValue(obj["height"]), h > 0 { displayHeight = h }
@@ -614,7 +711,10 @@ final class SessionController: ObservableObject {
             case 0:
                 self.handleJSON(json ?? "")
             case 1:
-                self.frameTick &+= 1
+                // Frame ready for `display` — ignore other monitors' buffers.
+                if display == self.currentDisplayIndex || self.displays.count <= 1 {
+                    self.frameTick &+= 1
+                }
                 if self.phase == .connecting {
                     self.phase = .connected
                     self.statusText = "Connected"
@@ -642,10 +742,17 @@ final class SessionController: ObservableObject {
         switch name {
         case "peer_info":
             parseDisplays(from: obj)
-            statusText = "Peer ready \(displayWidth)×\(displayHeight)"
+            if hasMultipleDisplays {
+                statusText = "Peer ready · \(displaySummary) · \(displayWidth)×\(displayHeight)"
+            } else {
+                statusText = "Peer ready \(displayWidth)×\(displayHeight)"
+            }
             refreshToggleState()
             // Prefer VideoToolbox-friendly codecs once the peer is known.
             applyCodecPreference()
+        case "sync_peer_info":
+            // Host added/removed monitors mid-session.
+            parseDisplays(from: obj)
         case "input-password", "session-login-password", "password":
             phase = .needPassword
             passwordPrompt = (obj["msg"] as? String) ?? "Enter password"
@@ -678,11 +785,25 @@ final class SessionController: ObservableObject {
         case "cursor_position":
             handleCursorPosition(obj)
         case "switch_display":
+            if let d = intValue(obj["display"]) {
+                currentDisplayIndex = d
+            }
             if let emb = obj["cursor_embedded"] {
                 cursorEmbedded = stringValue(emb) == "1" || (emb as? Bool) == true
             }
             if let w = intValue(obj["width"]), w > 0 { displayWidth = w }
             if let h = intValue(obj["height"]), h > 0 { displayHeight = h }
+            // Keep displays[] in sync with the active monitor's size.
+            if currentDisplayIndex >= 0, currentDisplayIndex < displays.count {
+                var list = displays
+                list[currentDisplayIndex].width = displayWidth
+                list[currentDisplayIndex].height = displayHeight
+                list[currentDisplayIndex].cursorEmbedded = cursorEmbedded
+                displays = list
+            }
+            if hasMultipleDisplays {
+                statusText = "Display \(displaySummary) · \(displayWidth)×\(displayHeight)"
+            }
         case "permission", "fingerprint":
             break
         default:
@@ -700,8 +821,9 @@ final class SessionController: ObservableObject {
         if let fpsRaw = stringValue(obj["fps"]), !fpsRaw.isEmpty {
             if let data = fpsRaw.data(using: .utf8),
                let map = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                // Prefer display 0 / first value.
-                if let v = map["0"] ?? map.values.first {
+                // Prefer current display / first value.
+                let key = "\(currentDisplayIndex)"
+                if let v = map[key] ?? map["0"] ?? map.values.first {
                     qualityFPS = stringValue(v) ?? "\(v)"
                 }
             } else {
