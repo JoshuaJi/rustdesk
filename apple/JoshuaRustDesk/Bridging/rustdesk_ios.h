@@ -16,6 +16,8 @@ void rd_main_init(const char *app_dir, const char *custom_cfg);
 char *rd_main_get_id(void);
 void rd_main_set_option(const char *key, const char *value);
 char *rd_main_get_option(const char *key);
+/// JSON array of recent peers (id, username, hostname, platform, alias). Free with rd_free_string.
+char *rd_main_recent_peers_json(void);
 
 int rd_session_add(const char *session_uuid, const char *peer_id, const char *password,
                    int force_relay, char **err_out);
@@ -36,6 +38,12 @@ void rd_session_input_key(const char *session_uuid, const char *name, int down, 
                           int ctrl, int shift, int command);
 void rd_session_handle_key(const char *session_uuid, const char *character, int usb_hid,
                            int lock_modes, int down);
+
+void rd_session_set_image_quality(const char *session_uuid, const char *value);
+char *rd_session_get_image_quality(const char *session_uuid);
+void rd_session_toggle_option(const char *session_uuid, const char *name);
+int rd_session_get_toggle_option(const char *session_uuid, const char *name);
+void rd_session_set_peer_option(const char *session_uuid, const char *name, const char *value);
 
 void rd_force_link(void);
 

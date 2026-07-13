@@ -51,7 +51,6 @@ struct RemoteSessionView: View {
         }
         .statusBarHidden(true)
         .onAppear {
-            // Prefer capturing hardware shortcuts while remote is open.
             session.captureSystemShortcuts = true
         }
         .onDisappear {
@@ -93,41 +92,62 @@ struct RemoteSessionView: View {
     }
 
     private var bottomBar: some View {
-        HStack(spacing: 10) {
-            chipButton(
-                icon: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
-                label: session.softKeyboardVisible ? "Hide KB" : "Keyboard"
-            ) {
-                // Toggle off capture briefly when opening soft KB so iOS text input wins.
-                let next = !session.softKeyboardVisible
-                if next {
-                    session.captureSystemShortcuts = false
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                chipButton(
+                    icon: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
+                    label: session.softKeyboardVisible ? "Hide KB" : "Keyboard"
+                ) {
+                    let next = !session.softKeyboardVisible
+                    if next {
+                        session.captureSystemShortcuts = false
+                    }
+                    session.softKeyboardVisible = next
                 }
-                session.softKeyboardVisible = next
+
+                chipButton(
+                    icon: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
+                    label: session.captureSystemShortcuts ? "Shortcuts On" : "Shortcuts"
+                ) {
+                    session.captureSystemShortcuts.toggle()
+                }
+
+                chipButton(icon: "doc.on.clipboard", label: "Paste") {
+                    session.pasteFromClipboard()
+                }
+
+                chipButton(icon: "sparkles.tv", label: session.qualityLabel) {
+                    session.cycleQuality()
+                }
             }
 
-            chipButton(
-                icon: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
-                label: session.captureSystemShortcuts ? "Shortcuts On" : "Shortcuts"
-            ) {
-                session.captureSystemShortcuts.toggle()
-            }
+            HStack(spacing: 8) {
+                chipButton(
+                    icon: session.viewOnly ? "eye.fill" : "hand.tap",
+                    label: session.viewOnly ? "View only" : "Control"
+                ) {
+                    session.toggleViewOnly()
+                }
 
-            chipButton(icon: "sparkles.tv", label: session.qualityLabel) {
-                session.cycleQuality()
-            }
+                chipButton(
+                    icon: session.showRemoteCursor ? "cursorarrow.click.2" : "cursorarrow",
+                    label: "Cursor"
+                ) {
+                    session.toggleRemoteCursor()
+                }
 
-            punchChip
+                punchChip
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
 
-            if session.displayWidth > 0 {
-                Text("\(session.displayWidth)×\(session.displayHeight)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.85))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .background(.black.opacity(0.4), in: Capsule())
+                if session.displayWidth > 0 {
+                    Text("\(session.displayWidth)×\(session.displayHeight)")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 6)
+                        .background(.black.opacity(0.4), in: Capsule())
+                }
             }
         }
         .padding(8)

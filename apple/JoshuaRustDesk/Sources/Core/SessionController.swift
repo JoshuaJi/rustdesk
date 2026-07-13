@@ -26,9 +26,14 @@ final class SessionController: ObservableObject {
     @Published var captureSystemShortcuts: Bool = true
     /// Simple quality label for toolbar.
     @Published var qualityLabel: String = "Balanced"
+    @Published var viewOnly: Bool = false
+    @Published var showRemoteCursor: Bool = true
 
     private(set) var sessionUUID: String = ""
     private var active = false
+    private var lastPassword: String = ""
+    private var lastForceRelay = false
+    private var rememberPassword = false
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
@@ -37,15 +42,25 @@ final class SessionController: ObservableObject {
         close()
     }
 
-    func connect(peerId: String, password: String, forceRelay: Bool = false) {
+    func connect(peerId: String, password: String, forceRelay: Bool = false, rememberPassword: Bool = false) {
         close()
         self.peerId = peerId
+        self.lastPassword = password
+        self.lastForceRelay = forceRelay
+        self.rememberPassword = rememberPassword
         sessionUUID = UUID().uuidString
         phase = .connecting
         statusText = "Connecting to \(peerId)…"
         softKeyboardVisible = false
+        viewOnly = false
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
+        RecentPeersStore.shared.record(
+            id: peerId,
+            password: password,
+            forceRelay: forceRelay,
+            rememberPassword: rememberPassword
+        )
 
         var err: UnsafeMutablePointer<CChar>?
         let add = rd_session_add(sessionUUID, peerId, password, forceRelay ? 1 : 0, &err)
@@ -71,13 +86,22 @@ final class SessionController: ObservableObject {
         active = true
 
         if !password.isEmpty {
-            rd_session_login(sessionUUID, password, 1)
+            rd_session_login(sessionUUID, password, rememberPassword ? 1 : 0)
         }
     }
 
     func submitPassword(_ password: String) {
         guard active else { return }
-        rd_session_login(sessionUUID, password, 1)
+        lastPassword = password
+        rd_session_login(sessionUUID, password, rememberPassword ? 1 : 0)
+        if rememberPassword {
+            RecentPeersStore.shared.record(
+                id: peerId,
+                password: password,
+                forceRelay: lastForceRelay,
+                rememberPassword: true
+            )
+        }
         phase = .connecting
         statusText = "Logging in…"
     }
@@ -100,7 +124,7 @@ final class SessionController: ObservableObject {
     // MARK: - Pointer / view
 
     func sendMouseJSON(_ json: String) {
-        guard active else { return }
+        guard active, !viewOnly else { return }
         rd_session_send_mouse(sessionUUID, json)
     }
 
@@ -113,13 +137,13 @@ final class SessionController: ObservableObject {
 
     /// Physical key via USB HID usage (map mode).
     func handleKey(character: String, usbHid: Int, down: Bool, lockModes: Int = 0) {
-        guard active, usbHid != 0 else { return }
+        guard active, !viewOnly, usbHid != 0 else { return }
         rd_session_handle_key(sessionUUID, character, Int32(usbHid), Int32(lockModes), down ? 1 : 0)
     }
 
     /// Soft-keyboard / paste text path.
     func inputString(_ value: String) {
-        guard active, !value.isEmpty else { return }
+        guard active, !viewOnly, !value.isEmpty else { return }
         rd_session_input_string(sessionUUID, value)
     }
 
@@ -133,7 +157,7 @@ final class SessionController: ObservableObject {
         shift: Bool = false,
         command: Bool = false
     ) {
-        guard active else { return }
+        guard active, !viewOnly else { return }
         rd_session_input_key(
             sessionUUID,
             name,
@@ -146,16 +170,56 @@ final class SessionController: ObservableObject {
         )
     }
 
-    /// Cycle image quality option for the peer (best-effort via main options + status).
+    /// Paste from iOS pasteboard into remote as text.
+    func pasteFromClipboard() {
+        guard let text = UIPasteboard.general.string, !text.isEmpty else {
+            statusText = "Clipboard empty"
+            return
+        }
+        inputString(text)
+        statusText = "Pasted \(text.count) chars"
+    }
+
+    // MARK: - Session options
+
+    /// Cycle image quality via real session API.
     func cycleQuality() {
-        let order = ["balanced", "best", "low", "custom"]
-        let labels = ["Balanced", "Best", "Low", "Custom"]
-        let idx = (order.firstIndex(of: qualityLabel.lowercased()) ?? 0)
+        let order = ["balanced", "best", "low"]
+        let labels = ["Balanced", "Best", "Low"]
+        let current = qualityLabel.lowercased()
+        let idx = order.firstIndex(of: current) ?? labels.firstIndex(of: qualityLabel) ?? 0
         let next = (idx + 1) % order.count
         qualityLabel = labels[next]
-        // Session-level option keys used by Flutter peer options when available.
-        rd_main_set_option("image_quality", order[next])
+        guard active else { return }
+        rd_session_set_image_quality(sessionUUID, order[next])
         statusText = "Quality: \(qualityLabel)"
+    }
+
+    func toggleViewOnly() {
+        guard active else { return }
+        rd_session_toggle_option(sessionUUID, "view-only")
+        viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
+        statusText = viewOnly ? "View only" : "Control enabled"
+    }
+
+    func toggleRemoteCursor() {
+        guard active else { return }
+        rd_session_toggle_option(sessionUUID, "show-remote-cursor")
+        showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+        statusText = showRemoteCursor ? "Remote cursor on" : "Remote cursor off"
+    }
+
+    func refreshToggleState() {
+        guard active else { return }
+        viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
+        showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+        if let p = rd_session_get_image_quality(sessionUUID) {
+            let q = String(cString: p)
+            rd_free_string(p)
+            if !q.isEmpty {
+                qualityLabel = q.capitalized
+            }
+        }
     }
 
     // MARK: - Frame pull
@@ -204,6 +268,7 @@ final class SessionController: ObservableObject {
                 if self.phase == .connecting {
                     self.phase = .connected
                     self.statusText = "Connected"
+                    self.refreshToggleState()
                 }
             case 2:
                 self.active = false
@@ -238,6 +303,7 @@ final class SessionController: ObservableObject {
                 displayHeight = obj["height"] as? Int ?? displayHeight
             }
             statusText = "Peer ready"
+            refreshToggleState()
         case "input-password", "session-login-password", "password":
             phase = .needPassword
             passwordPrompt = (obj["msg"] as? String) ?? "Enter password"
@@ -251,6 +317,7 @@ final class SessionController: ObservableObject {
         case "connection_ready", "success":
             phase = .connected
             statusText = "Connected"
+            refreshToggleState()
         case "cursor_data", "cursor_id", "cursor_position", "permission", "clipboard":
             break
         default:

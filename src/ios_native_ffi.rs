@@ -6,12 +6,14 @@
 use crate::{
     flutter::{self, session_add, session_start_native},
     flutter_ffi::{
-        main_init, session_close, session_input_key, session_input_string, session_login,
-        session_send_mouse, session_set_size, SessionID,
+        main_init, session_close, session_get_image_quality, session_get_toggle_option,
+        session_input_key, session_input_string, session_login, session_peer_option,
+        session_send_mouse, session_set_image_quality, session_set_size, session_toggle_option,
+        SessionID,
     },
-    ui_interface::{get_id, get_option, set_option},
+    ui_interface::{get_id, get_option, peer_to_map, set_option},
 };
-use hbb_common::log;
+use hbb_common::{config::PeerConfig, log};
 use std::{
     ffi::{CStr, CString},
     os::raw::{c_char, c_int, c_void},
@@ -268,6 +270,77 @@ pub extern "C" fn rd_session_handle_key(
     }
 }
 
+// MARK: - Session options (Phase 3)
+
+#[no_mangle]
+pub extern "C" fn rd_session_set_image_quality(session_uuid: *const c_char, value: *const c_char) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    session_set_image_quality(sid, cstring_or_empty(value));
+}
+
+#[no_mangle]
+pub extern "C" fn rd_session_get_image_quality(session_uuid: *const c_char) -> *mut c_char {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return CString::new("").unwrap().into_raw();
+    };
+    let q = session_get_image_quality(sid).unwrap_or_default();
+    CString::new(q).unwrap_or_default().into_raw()
+}
+
+/// Toggle peer options like "view-only", "show-remote-cursor", "disable-clipboard",
+/// "disable-audio", "lock-after-session-end", "privacy-mode", etc.
+#[no_mangle]
+pub extern "C" fn rd_session_toggle_option(session_uuid: *const c_char, name: *const c_char) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    session_toggle_option(sid, cstring_or_empty(name));
+}
+
+/// Returns 1 if option is on, 0 if off/unknown.
+#[no_mangle]
+pub extern "C" fn rd_session_get_toggle_option(
+    session_uuid: *const c_char,
+    name: *const c_char,
+) -> c_int {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return 0;
+    };
+    match session_get_toggle_option(sid, cstring_or_empty(name)) {
+        Some(true) => 1,
+        _ => 0,
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rd_session_set_peer_option(
+    session_uuid: *const c_char,
+    name: *const c_char,
+    value: *const c_char,
+) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    session_peer_option(sid, cstring_or_empty(name), cstring_or_empty(value));
+}
+
+/// JSON array of recent peers from PeerConfig disk store.
+/// Each object: id, username, hostname, platform, alias (password hash omitted).
+#[no_mangle]
+pub extern "C" fn rd_main_recent_peers_json() -> *mut c_char {
+    let peers = PeerConfig::peers(None);
+    let mut arr = Vec::new();
+    for (id, _t, p) in peers.into_iter().take(40) {
+        let mut m = peer_to_map(id, p);
+        m.remove("hash"); // do not expose password material over ABI
+        arr.push(m);
+    }
+    let s = serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_owned());
+    CString::new(s).unwrap_or_default().into_raw()
+}
+
 fn set_err(err_out: *mut *mut c_char, msg: &str) {
     if err_out.is_null() {
         return;
@@ -284,6 +357,9 @@ pub extern "C" fn rd_force_link() {
         rd_main_init as *const (),
         rd_session_add as *const (),
         rd_session_start as *const (),
+        rd_session_set_image_quality as *const (),
+        rd_session_toggle_option as *const (),
+        rd_main_recent_peers_json as *const (),
         crate::flutter::session_get_rgba as *const (),
     );
 }

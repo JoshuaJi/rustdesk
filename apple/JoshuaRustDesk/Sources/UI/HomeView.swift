@@ -3,10 +3,12 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject var bridge: RustDeskBridge
     @StateObject private var session = SessionController()
+    @StateObject private var recents = RecentPeersStore.shared
     @State private var peerId = ""
     @State private var password = ""
     @State private var showRemote = false
-    @State private var promptPassword = ""
+    @AppStorage("force_relay") private var forceRelay = false
+    @AppStorage("remember_password") private var rememberPassword = true
 
     var body: some View {
         Form {
@@ -23,12 +25,66 @@ struct HomeView: View {
                     .autocorrectionDisabled()
                     .keyboardType(.numberPad)
                 SecureField("Password (optional)", text: $password)
+                Toggle("Force relay", isOn: $forceRelay)
+                Toggle("Remember password", isOn: $rememberPassword)
                 Button("Connect") {
-                    bridge.pushNetworkOptionsToRust()
-                    session.connect(peerId: peerId.trimmingCharacters(in: .whitespaces), password: password)
-                    showRemote = true
+                    startConnect(
+                        id: peerId.trimmingCharacters(in: .whitespacesAndNewlines),
+                        password: password,
+                        forceRelay: forceRelay
+                    )
                 }
-                .disabled(peerId.trimmingCharacters(in: .whitespaces).isEmpty)
+                .disabled(peerId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if !recents.combined.isEmpty {
+                Section {
+                    ForEach(recents.combined) { peer in
+                        Button {
+                            peerId = peer.id
+                            if !peer.lastPassword.isEmpty {
+                                password = peer.lastPassword
+                            }
+                            startConnect(
+                                id: peer.id,
+                                password: peer.lastPassword.isEmpty ? password : peer.lastPassword,
+                                forceRelay: peer.forceRelay || forceRelay
+                            )
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(peer.displayName)
+                                        .foregroundStyle(.primary)
+                                    if peer.lastConnected > .distantPast {
+                                        Text(peer.lastConnected, style: .relative)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                        .swipeActions(edge: .trailing) {
+                            Button(role: .destructive) {
+                                recents.remove(peer.id)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                    if !recents.peers.isEmpty {
+                        Button("Clear history", role: .destructive) {
+                            recents.clear()
+                        }
+                    }
+                } header: {
+                    Text("Recent")
+                } footer: {
+                    Text("Tap to reconnect. Swipe to remove from local history.")
+                }
             }
 
             if case .failed(let msg) = session.phase {
@@ -39,19 +95,25 @@ struct HomeView: View {
         }
         .fullScreenCover(isPresented: $showRemote, onDismiss: {
             session.close()
+            recents.reloadFromRust()
         }) {
             RemoteSessionView(session: session, isPresented: $showRemote)
         }
-        .onChange(of: session.phase) { phase in
-            if case .needPassword = phase {
-                // prompt handled inside remote view
-            }
-            if case .failed = phase {
-                // stay on sheet to show error
-            }
+        .onAppear {
+            recents.load()
+            recents.reloadFromRust()
         }
-        .onChange(of: session.phase) { _ in
-            promptPassword = ""
-        }
+    }
+
+    private func startConnect(id: String, password: String, forceRelay: Bool) {
+        guard !id.isEmpty else { return }
+        bridge.pushNetworkOptionsToRust()
+        session.connect(
+            peerId: id,
+            password: password,
+            forceRelay: forceRelay,
+            rememberPassword: rememberPassword
+        )
+        showRemote = true
     }
 }
