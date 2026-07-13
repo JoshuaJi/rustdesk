@@ -1,11 +1,13 @@
 import UIKit
 
-/// Soft keyboard host in a dedicated `UIWindow` so the system keyboard does not
-/// resize the main remote-session layout (sidebar + Metal canvas).
+/// Soft keyboard host: a **1×1 non-interactive** window that only owns first-responder
+/// status for the system keyboard.
 ///
-/// Becoming first responder inside the main hierarchy triggers UIKit keyboard
-/// avoidance on the fullScreenCover hosting controller. Hosting the field in a
-/// tiny secondary window keeps the main window's frame stable.
+/// Important:
+/// - Must NOT sit full-screen over the session UI (that blocked sidebar taps).
+/// - After the keyboard is up, the **main session window is made key again** so
+///   touches (sidebar, canvas) go to the remote session. The text field can stay
+///   first responder without its window remaining key.
 final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
     static let shared = SoftKeyboardHost()
 
@@ -15,41 +17,25 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
 
     private var isShowing = false
     private let sentinel = "\u{200B}"
+    private weak var mainWindow: UIWindow?
 
     private lazy var keyboardWindow: UIWindow = {
-        // Match screen size but pass through touches outside the text field.
-        // A 2×2 window can make iPad dock the keyboard in ways that still
-        // disturb the main scene; a full transparent overlay is more stable.
-        let bounds = UIScreen.main.bounds
-        let w = UIWindow(frame: bounds)
+        // Tiny, off the interactive area — never covers sidebar or canvas.
+        let w = UIWindow(frame: CGRect(x: -2, y: -2, width: 1, height: 1))
         w.backgroundColor = .clear
-        w.windowLevel = .alert + 1
+        w.windowLevel = .normal + 1
         w.isHidden = true
-        let vc = PassthroughViewController()
+        // Critical: never participate in hit-testing.
+        w.isUserInteractionEnabled = false
+        let vc = UIViewController()
         vc.view.backgroundColor = .clear
+        vc.view.isUserInteractionEnabled = false
         w.rootViewController = vc
         return w
     }()
 
-    /// Root VC whose view ignores hits except the text field.
-    private final class PassthroughViewController: UIViewController {
-        override func loadView() {
-            view = PassthroughView()
-        }
-    }
-
-    private final class PassthroughView: UIView {
-        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
-            let hit = super.hitTest(point, with: event)
-            // Only capture hits on the text field (and its subviews); everything
-            // else falls through to the remote session window underneath.
-            if hit is UITextField { return hit }
-            return nil
-        }
-    }
-
     private lazy var field: UITextField = {
-        let f = UITextField(frame: CGRect(x: 0, y: 0, width: 2, height: 2))
+        let f = UITextField(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
         f.delegate = self
         f.autocorrectionType = .no
         f.autocapitalizationType = .none
@@ -64,6 +50,7 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         f.tintColor = .clear
         f.textColor = .clear
         f.backgroundColor = .clear
+        f.isUserInteractionEnabled = false
         f.text = sentinel
         return f
     }()
@@ -77,10 +64,12 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            guard let self, self.isShowing, !self.field.isFirstResponder else { return }
-            // System dismissed keyboard (e.g. HW keyboard connect).
+            guard let self, self.isShowing else { return }
             DispatchQueue.main.async {
-                self.hide(notify: true)
+                // If we still think we're showing but field lost FR, sync UI.
+                if self.isShowing, !self.field.isFirstResponder {
+                    self.hide(notify: true)
+                }
             }
         }
     }
@@ -92,38 +81,43 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
     }
 
     func show(in scene: UIWindowScene?) {
-        if let scene {
-            keyboardWindow.windowScene = scene
-        } else if keyboardWindow.windowScene == nil {
-            keyboardWindow.windowScene = UIApplication.shared.connectedScenes
-                .compactMap { $0 as? UIWindowScene }
-                .first
-        }
-        guard let scene = keyboardWindow.windowScene else { return }
+        let scene = scene
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        guard let scene else { return }
 
-        // Keep frame in sync with the scene (rotation / multitasking).
-        keyboardWindow.frame = scene.coordinateSpace.bounds
+        keyboardWindow.windowScene = scene
+        // Remember the real app window so we can restore key status for taps.
+        mainWindow = scene.windows
+            .filter { $0 !== keyboardWindow && !$0.isHidden }
+            .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+            .first
+
+        keyboardWindow.frame = CGRect(x: -2, y: -2, width: 1, height: 1)
+        keyboardWindow.isUserInteractionEnabled = false
 
         if field.superview == nil {
             let host = keyboardWindow.rootViewController!.view!
-            field.translatesAutoresizingMaskIntoConstraints = false
+            host.isUserInteractionEnabled = false
+            field.frame = CGRect(x: 0, y: 0, width: 1, height: 1)
             host.addSubview(field)
-            NSLayoutConstraint.activate([
-                field.widthAnchor.constraint(equalToConstant: 1),
-                field.heightAnchor.constraint(equalToConstant: 1),
-                field.leadingAnchor.constraint(equalTo: host.leadingAnchor),
-                field.topAnchor.constraint(equalTo: host.topAnchor),
-            ])
         }
+
         isShowing = true
         keyboardWindow.isHidden = false
-        // Key window so the keyboard is owned by this overlay — main session
-        // hosting controller must not be the keyboard layout client.
-        keyboardWindow.makeKeyAndVisible()
         field.text = sentinel
+
+        // Briefly become key so the keyboard attaches, then hand key status back
+        // to the session window so sidebar/canvas receive taps.
+        keyboardWindow.makeKeyAndVisible()
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isShowing else { return }
             _ = self.field.becomeFirstResponder()
+            // Restore main window as key — keyboard stays if field remains FR.
+            self.restoreMainKeyWindow()
+            // One more pass after keyboard animation starts.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                self?.restoreMainKeyWindow()
+            }
         }
     }
 
@@ -132,17 +126,23 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         isShowing = false
         field.resignFirstResponder()
         keyboardWindow.isHidden = true
-        // Restore key window to the main app window so touches route normally.
-        if let scene = keyboardWindow.windowScene {
-            // Prefer the app's primary window (lowest normal level, not our overlay).
-            let main = scene.windows
-                .filter { $0 !== keyboardWindow && !$0.isHidden }
-                .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
-                .first
-            main?.makeKey()
-        }
+        restoreMainKeyWindow()
         if notify {
             onHide?()
+        }
+    }
+
+    private func restoreMainKeyWindow() {
+        if let main = mainWindow, !main.isHidden {
+            main.makeKey()
+            return
+        }
+        if let scene = keyboardWindow.windowScene {
+            scene.windows
+                .filter { $0 !== keyboardWindow && !$0.isHidden }
+                .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+                .first?
+                .makeKey()
         }
     }
 
@@ -156,7 +156,6 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         if string.isEmpty {
             onDelete?()
         } else if string == "\n" {
-            // Return — send as text; session can map later if needed.
             onInsert?("\n")
         } else {
             onInsert?(string)
