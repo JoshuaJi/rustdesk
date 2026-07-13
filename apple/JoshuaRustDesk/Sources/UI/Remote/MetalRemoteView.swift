@@ -397,37 +397,11 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     private func setupKeyboardNotifications() {
         keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
         keyboardObservers.removeAll()
-        // User swipe-dismissed the software keyboard — sync toolbar toggle.
-        let hide = NotificationCenter.default.addObserver(
-            forName: UIResponder.keyboardDidHideNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            guard let self, self.softKeyboardOn else { return }
-            // Only clear if we no longer own text input (system really hid it).
-            // Keep state if we are still FR and merely reloading input views.
-            if !self.isFirstResponder || self.inputView != nil {
-                // When soft keyboard mode is on, inputView is nil; if hide fired
-                // while we still want soft KB, try to re-show once.
-            }
-            // If user explicitly dismissed (we stay FR with empty inputView only
-            // after we set softKeyboardOn=false). Detect: soft on + no keyboard frame.
-            DispatchQueue.main.async { [weak self] in
-                guard let self, self.softKeyboardOn else { return }
-                // If still FR with system inputView (nil) but keyboard gone, user
-                // dismissed — flip toolbar off. Hardware keyboard connected also
-                // hides soft keyboard without resigning FR; leave toggle on so a
-                // second tap can retry, and do not auto-clear in that case.
-                // Heuristic: if we are not FR, clear. If we are FR, leave alone
-                // (HW keyboard / temporary hide).
-                if !self.isFirstResponder {
-                    self.softKeyboardOn = false
-                    self.session?.softKeyboardVisible = false
-                    self.claimHardwareFocus()
-                }
-            }
-        }
-        keyboardObservers.append(hide)
+        // Soft keyboard dismiss sync is owned by SoftKeyboardHost.onHide ONLY.
+        // Do not clear softKeyboardOn from keyboardDidHide here: while the soft
+        // keyboard is up, SoftKeyboardHost owns first responder (metal is not FR).
+        // A hide notification during resign→become re-show would incorrectly
+        // force softKeyboardVisible=false and block the second open.
     }
 
     // MARK: First responder / soft keyboard
@@ -467,16 +441,18 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
 
     func setSoftKeyboard(_ on: Bool) {
         // Idempotent: updateUIView runs on every @Published tick (cursor, FPS, …).
-        // Never call reloadInputViews on the hot path — it can dismiss/recreate the KB.
+        // Do NOT thrash FR — host owns FR while soft keyboard is up (metal is not FR).
         if on == softKeyboardOn {
-            if on, !isFirstResponder {
-                ensureSoftKeyboardVisible()
+            if on,
+               SoftKeyboardHost.shared.isShowing,
+               !SoftKeyboardHost.shared.isFieldFirstResponder {
+                // Lost FR while toolbar still says "keyboard on" — re-show once.
+                SoftKeyboardHost.shared.show(attachedTo: self)
             }
             return
         }
         softKeyboardOn = on
         if on {
-            SoftKeyboardHost.shared.hide(notify: false) // drop any legacy host FR
             presentSoftKeyboard()
         } else {
             dismissSoftKeyboard()
@@ -505,18 +481,20 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         }
         host.onHide = { [weak self] in
             guard let self else { return }
+            // User swipe-dismissed the keyboard — sync toolbar without fighting re-show.
             self.softKeyboardOn = false
-            self.session?.softKeyboardVisible = false
+            if self.session?.softKeyboardVisible == true {
+                self.session?.softKeyboardVisible = false
+            }
             self.claimHardwareFocus()
         }
 
-        // Defer past the sidebar button touch-up.
+        // Defer past the sidebar button touch-up so UIControl doesn't steal FR.
         DispatchQueue.main.async { [weak self] in
             guard let self, self.softKeyboardOn else { return }
-            // Primary: pass-through key window (proven to raise system keyboard).
             host.show(attachedTo: self)
-            // Secondary insurance after a beat: local field / UIKeyInput if host failed.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            // Fallback only if host never got FR (do not steal a working host).
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
                 self?.ensureSoftKeyboardVisibleLocalFallback()
             }
         }
@@ -525,16 +503,13 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
     /// Only used if SoftKeyboardHost did not become first responder.
     private func ensureSoftKeyboardVisibleLocalFallback() {
         guard softKeyboardOn else { return }
-        // Host already owns FR → done.
-        if SoftKeyboardHost.shared.isShowing {
-            // Can't see host field FR from here easily; if keyboard still missing
-            // try local path only when metal/window still key without host.
-            // SoftKeyboardHost keeps its window key while showing — if our window
-            // is still key, host likely failed.
-            if window?.isKeyWindow == true {
-                // Host window should be key; if session window is key, host failed.
-                activateLocalSoftField()
-            }
+        let host = SoftKeyboardHost.shared
+        if host.isShowing, host.isFieldFirstResponder {
+            return // Host is healthy.
+        }
+        // Host failed — try once more, then local field.
+        if host.isShowing {
+            host.show(attachedTo: self)
             return
         }
         activateLocalSoftField()
@@ -560,25 +535,13 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         }
     }
 
-    private func ensureSoftKeyboardVisible() {
-        // Called from setSoftKeyboard idempotent path when FR was lost.
-        guard softKeyboardOn else { return }
-        if !SoftKeyboardHost.shared.isShowing {
-            SoftKeyboardHost.shared.show(attachedTo: self)
-        }
-    }
-
     private func dismissSoftKeyboard() {
         SoftKeyboardHost.shared.hide(notify: false)
         if softField.isFirstResponder {
             softField.resignFirstResponder()
         }
         // Stay first responder for HW keys; empty inputView hides the soft keyboard.
-        if isFirstResponder {
-            reloadInputViews()
-        } else {
-            claimHardwareFocus()
-        }
+        claimHardwareFocus()
     }
 
     private func claimHardwareFocus() {
@@ -602,7 +565,7 @@ final class TouchMetalView: MTKView, UIGestureRecognizerDelegate, UIKeyInput {
         super.didMoveToWindow()
         if window != nil {
             if softKeyboardOn {
-                ensureSoftKeyboardVisible()
+                SoftKeyboardHost.shared.show(attachedTo: self)
             } else {
                 claimHardwareFocus()
             }
