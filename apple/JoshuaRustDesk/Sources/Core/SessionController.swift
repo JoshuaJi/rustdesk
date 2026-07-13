@@ -11,7 +11,7 @@ enum SessionPhase: Equatable {
     case closed
 }
 
-/// Owns one remote session: events from Rust, frame notifications, login.
+/// Owns one remote session: events from Rust, frame notifications, login, input.
 final class SessionController: ObservableObject {
     @Published var phase: SessionPhase = .idle
     @Published var statusText: String = ""
@@ -20,6 +20,12 @@ final class SessionController: ObservableObject {
     @Published var frameTick: UInt64 = 0
     @Published var displayWidth: Int = 0
     @Published var displayHeight: Int = 0
+    /// Soft-keyboard toggle (bound by toolbar / Metal view).
+    @Published var softKeyboardVisible: Bool = false
+    /// Steal iPadOS system shortcuts (⌘C etc.) when possible.
+    @Published var captureSystemShortcuts: Bool = true
+    /// Simple quality label for toolbar.
+    @Published var qualityLabel: String = "Balanced"
 
     private(set) var sessionUUID: String = ""
     private var active = false
@@ -37,6 +43,7 @@ final class SessionController: ObservableObject {
         sessionUUID = UUID().uuidString
         phase = .connecting
         statusText = "Connecting to \(peerId)…"
+        softKeyboardVisible = false
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
 
@@ -81,6 +88,7 @@ final class SessionController: ObservableObject {
             return
         }
         active = false
+        softKeyboardVisible = false
         if !sessionUUID.isEmpty {
             rd_session_close(sessionUUID)
         }
@@ -88,6 +96,8 @@ final class SessionController: ObservableObject {
         statusText = "Disconnected"
         releaseRetained()
     }
+
+    // MARK: - Pointer / view
 
     func sendMouseJSON(_ json: String) {
         guard active else { return }
@@ -99,6 +109,55 @@ final class SessionController: ObservableObject {
         rd_session_set_size(sessionUUID, 0, width, height)
     }
 
+    // MARK: - Keyboard
+
+    /// Physical key via USB HID usage (map mode).
+    func handleKey(character: String, usbHid: Int, down: Bool, lockModes: Int = 0) {
+        guard active, usbHid != 0 else { return }
+        rd_session_handle_key(sessionUUID, character, Int32(usbHid), Int32(lockModes), down ? 1 : 0)
+    }
+
+    /// Soft-keyboard / paste text path.
+    func inputString(_ value: String) {
+        guard active, !value.isEmpty else { return }
+        rd_session_input_string(sessionUUID, value)
+    }
+
+    /// Named key (Backspace, Enter, …) with modifiers.
+    func inputKey(
+        name: String,
+        down: Bool,
+        press: Bool = false,
+        alt: Bool = false,
+        ctrl: Bool = false,
+        shift: Bool = false,
+        command: Bool = false
+    ) {
+        guard active else { return }
+        rd_session_input_key(
+            sessionUUID,
+            name,
+            down ? 1 : 0,
+            press ? 1 : 0,
+            alt ? 1 : 0,
+            ctrl ? 1 : 0,
+            shift ? 1 : 0,
+            command ? 1 : 0
+        )
+    }
+
+    /// Cycle image quality option for the peer (best-effort via main options + status).
+    func cycleQuality() {
+        let order = ["balanced", "best", "low", "custom"]
+        let labels = ["Balanced", "Best", "Low", "Custom"]
+        let idx = (order.firstIndex(of: qualityLabel.lowercased()) ?? 0)
+        let next = (idx + 1) % order.count
+        qualityLabel = labels[next]
+        // Session-level option keys used by Flutter peer options when available.
+        rd_main_set_option("image_quality", order[next])
+        statusText = "Quality: \(qualityLabel)"
+    }
+
     // MARK: - Frame pull
 
     func pullFrame() -> (Data, Int, Int)? {
@@ -106,11 +165,9 @@ final class SessionController: ObservableObject {
         let size = rd_session_get_rgba_size(sessionUUID, 0)
         guard size > 0 else { return nil }
         guard let ptr = rd_session_get_rgba(sessionUUID, 0) else { return nil }
-        // Infer size from peer info when available; fall back to square-ish
         var w = displayWidth
         var h = displayHeight
         if w <= 0 || h <= 0 {
-            // BGRA 4 bytes/pixel
             let pixels = size / 4
             w = displayWidth > 0 ? displayWidth : Int(sqrt(Double(pixels)))
             h = w > 0 ? pixels / w : 0
@@ -120,7 +177,6 @@ final class SessionController: ObservableObject {
             }
         }
         if w <= 0 || h <= 0 || w * h * 4 > size {
-            // still pull and use size-based estimate
             let pixels = size / 4
             w = max(1, Int(sqrt(Double(pixels))))
             h = max(1, pixels / w)
@@ -177,7 +233,6 @@ final class SessionController: ObservableObject {
                 displayWidth = first["width"] as? Int ?? 0
                 displayHeight = first["height"] as? Int ?? 0
             }
-            // Also try top-level
             if displayWidth == 0 {
                 displayWidth = obj["width"] as? Int ?? displayWidth
                 displayHeight = obj["height"] as? Int ?? displayHeight
@@ -195,8 +250,10 @@ final class SessionController: ObservableObject {
             statusText = text
         case "connection_ready", "success":
             phase = .connected
+            statusText = "Connected"
+        case "cursor_data", "cursor_id", "cursor_position", "permission", "clipboard":
+            break
         default:
-            // Keep last status for debugging without noise
             if phase == .connecting {
                 statusText = name.isEmpty ? raw : name
             }
