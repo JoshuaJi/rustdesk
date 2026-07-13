@@ -810,8 +810,8 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
                 let v = g.velocity(in: self)
                 if abs(v.y) > 400 {
                     let notches = min(6, max(1, Int(abs(v.y) / 900)))
-                    // v.y > 0 = fling downward = more content below = wheel y negative in Flutter terms
-                    let y = v.y > 0 ? -1 : 1
+                    // Natural iOS: fling finger up → content follows up (wheel y negative).
+                    let y = v.y > 0 ? 1 : -1
                     for _ in 0..<notches {
                         sendWheelNotch(x: 0, y: y)
                     }
@@ -842,21 +842,20 @@ final class TouchMetalView: MTKView, UITextFieldDelegate, UIGestureRecognizerDel
         let horizontal = absX >= absY * 0.65
 
         if vertical {
-            // Flutter PointerScroll: rawDy > 0 → send y = -1; rawDy < 0 → y = +1.
-            // Finger moving down (t.y > 0) ≈ scroll-down ≈ rawDy > 0 ≈ y = -1.
+            // Natural iOS: finger up (t.y < 0) → content moves up with finger.
             wheelAccumulator += t.y
             while abs(wheelAccumulator) >= wheelStepPoints {
                 let dir = wheelAccumulator > 0 ? 1 : -1
                 wheelAccumulator -= CGFloat(dir) * wheelStepPoints
-                sendWheelNotch(x: 0, y: -dir)
+                sendWheelNotch(x: 0, y: dir)
             }
         } else if horizontal {
-            // Horizontal wheel (shift-scroll style): use x notches.
+            // Horizontal wheel: same natural mapping as vertical.
             wheelAccumulator += t.x
             while abs(wheelAccumulator) >= wheelStepPoints {
                 let dir = wheelAccumulator > 0 ? 1 : -1
                 wheelAccumulator -= CGFloat(dir) * wheelStepPoints
-                sendWheelNotch(x: -dir, y: 0)
+                sendWheelNotch(x: dir, y: 0)
             }
         }
     }
