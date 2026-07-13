@@ -212,6 +212,10 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
     private var panOffset: CGPoint = .zero
     private let minZoom: CGFloat = 1
     private let maxZoom: CGFloat = 6
+    /// Soft margin from view edges before auto-pan kicks in (cursor mode + zoom).
+    private let cursorEdgeMargin: CGFloat = 48
+    /// Track mode flips so we can re-center once when entering cursor mode.
+    private var wasCursorMode = false
 
     /// Unified gesture state machine (sole owner of pointer semantics).
     private let gestures = RemoteGestureEngine()
@@ -327,6 +331,8 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
                 toX: session.cursorX + (dx / scale) * sens,
                 y: session.cursorY + (dy / scale) * sens
             )
+            // Keep pointer in the phone viewport while zoomed (trackpad-style).
+            ensureCursorOnScreen()
         case .leftClickAtCursor(let count):
             for _ in 0..<max(1, count) {
                 session?.clickAtCursor(button: "left")
@@ -387,8 +393,16 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
     func updateCursorOverlay() {
         guard let session else {
             cursorView.isHidden = true
+            wasCursorMode = false
             return
         }
+        let cursorMode = isCursorMode
+        // Entering cursor mode: once, pull viewport so the pointer is on-screen.
+        if cursorMode, !wasCursorMode {
+            ensureCursorOnScreen()
+        }
+        wasCursorMode = cursorMode
+
         let show = session.showRemoteCursor && session.cursorVisible && !session.cursorEmbedded
         guard show else {
             cursorView.isHidden = true
@@ -793,6 +807,34 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
         let maxY = max(0, (ch - vh) / 2)
         panOffset.x = min(maxX, max(-maxX, panOffset.x))
         panOffset.y = min(maxY, max(-maxY, panOffset.y))
+    }
+
+    /// Cursor mode + zoom: if the remote pointer maps outside a soft inset of
+    /// the phone viewport, shift `panOffset` so it stays on-screen.
+    ///
+    /// Only runs when zoomed (`clampPan` zeros pan at 1×). Does **not** run on
+    /// two-finger pan — only after cursor motion / mode entry.
+    private func ensureCursorOnScreen() {
+        guard isCursorMode, userZoom > 1.05 else { return }
+        guard let session, bounds.width > 1, bounds.height > 1 else { return }
+        guard session.displayWidth > 0, session.displayHeight > 0 else { return }
+
+        let p = mapFromRemote(x: session.cursorX, y: session.cursorY)
+        let m = cursorEdgeMargin
+        let safe = bounds.insetBy(dx: m, dy: m)
+        guard safe.width > 1, safe.height > 1 else { return }
+
+        // contentRect origin includes panOffset; moving panOffset by δ moves p by δ.
+        var dPan = CGPoint.zero
+        if p.x < safe.minX { dPan.x = safe.minX - p.x }
+        else if p.x > safe.maxX { dPan.x = safe.maxX - p.x }
+        if p.y < safe.minY { dPan.y = safe.minY - p.y }
+        else if p.y > safe.maxY { dPan.y = safe.maxY - p.y }
+
+        guard dPan.x != 0 || dPan.y != 0 else { return }
+        panOffset.x += dPan.x
+        panOffset.y += dPan.y
+        clampPan()
     }
 
     /// Zoom keeping `anchor` (view point) fixed on the same remote pixel.
