@@ -499,6 +499,7 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
             return
         }
         softKeyboardOn = on
+        cachedPriorityCommands = nil // rebuild ⌘-steal set after soft keyboard cycle
         if on {
             presentSoftKeyboard()
         } else {
@@ -514,12 +515,7 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
         let host = SoftKeyboardHost.shared
         host.onInsert = { [weak self] text in
             guard let self, self.softKeyboardOn else { return }
-            if text == "\n" || text == "\r" {
-                self.session?.handleKey(character: "\n", usbHid: 0x28, down: true)
-                self.session?.handleKey(character: "\n", usbHid: 0x28, down: false)
-            } else {
-                self.session?.inputString(text)
-            }
+            self.forwardSoftKeyboardText(text)
         }
         host.onDelete = { [weak self] in
             guard let self, self.softKeyboardOn else { return }
@@ -627,12 +623,7 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
         // Only accept insertText while soft keyboard mode is on.
         // HW keys while soft-off are handled by pressesBegan (avoids double-fire).
         guard softKeyboardOn else { return }
-        if text == "\n" || text == "\r" {
-            session?.handleKey(character: "\n", usbHid: 0x28, down: true)
-            session?.handleKey(character: "\n", usbHid: 0x28, down: false)
-        } else {
-            session?.inputString(text)
-        }
+        forwardSoftKeyboardText(text)
     }
 
     func deleteBackward() {
@@ -641,20 +632,43 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
         session?.handleKey(character: "", usbHid: 0x2A, down: false)
     }
 
+    /// Soft keyboard → peer.
+    /// Plain typing uses `inputString`. With sticky sidebar ⌘/⌃/⌥/⇧ held, send
+    /// HID key taps so chords like ⌘C work without an external keyboard.
+    private func forwardSoftKeyboardText(_ text: String) {
+        if text == "\n" || text == "\r" {
+            session?.handleKey(character: "\n", usbHid: 0x28, down: true)
+            session?.handleKey(character: "\n", usbHid: 0x28, down: false)
+            return
+        }
+        let sticky = session.map { $0.modCommand || $0.modControl || $0.modOption || $0.modShift } ?? false
+        if sticky {
+            for ch in text {
+                let s = String(ch)
+                let hid = Self.usbHidUsage(forKeyCommandInput: s.lowercased())
+                if hid != 0 {
+                    session?.handleKey(character: s, usbHid: hid, down: true)
+                    session?.handleKey(character: s, usbHid: hid, down: false)
+                } else {
+                    session?.inputString(s)
+                }
+            }
+            return
+        }
+        session?.inputString(text)
+    }
+
     // MARK: Hardware key presses
 
+    /// Always forward HW keys to the peer when soft keyboard is off.
+    /// `captureSystemShortcuts` only controls *stealing* ⌘C/etc from iPadOS via UIKeyCommand.
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
-        // Soft keyboard / UIKeyInput owns character entry; still forward presses
-        // for non-character keys when not capturing via insertText.
         if softKeyboardOn {
             super.pressesBegan(presses, with: event)
             return
         }
-        if captureSystemShortcuts {
-            handlePresses(presses, down: true)
-            return
-        }
-        super.pressesBegan(presses, with: event)
+        handlePresses(presses, down: true)
+        // Don't call super — avoids double-delivery when UIKeyCommands also fire.
     }
 
     override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -662,11 +676,7 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
             super.pressesEnded(presses, with: event)
             return
         }
-        if captureSystemShortcuts {
-            handlePresses(presses, down: false)
-            return
-        }
-        super.pressesEnded(presses, with: event)
+        handlePresses(presses, down: false)
     }
 
     override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -674,11 +684,7 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
             super.pressesCancelled(presses, with: event)
             return
         }
-        if captureSystemShortcuts {
-            handlePresses(presses, down: false)
-            return
-        }
-        super.pressesCancelled(presses, with: event)
+        handlePresses(presses, down: false)
     }
 
     private func handlePresses(_ presses: Set<UIPress>, down: Bool) {
@@ -694,15 +700,54 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
     // MARK: UIKeyCommand priority (steal ⌘C etc.)
 
     override var keyCommands: [UIKeyCommand]? {
-        guard captureSystemShortcuts else { return super.keyCommands }
+        guard captureSystemShortcuts, !softKeyboardOn else { return super.keyCommands }
         if let cached = cachedPriorityCommands { return cached }
         let built = Self.buildPriorityCommands(action: #selector(priorityCommandFired(_:)))
         cachedPriorityCommands = built
         return built
     }
 
+    /// When iPadOS yields a stolen shortcut only as UIKeyCommand (no presses stream),
+    /// synthesize a down/up so the peer still receives e.g. ⌘C / ⌘V.
     @objc private func priorityCommandFired(_ sender: UIKeyCommand) {
-        // Intentionally empty — real down/up arrives via pressesBegan/Ended.
+        guard captureSystemShortcuts, !softKeyboardOn else { return }
+        guard let input = sender.input, !input.isEmpty else { return }
+        let hid = Self.usbHidUsage(forKeyCommandInput: input)
+        guard hid != 0 else { return }
+        // Hold sticky sidebar modifiers if active; otherwise send pure chord from key command.
+        let chars = input.count == 1 ? input : ""
+        session?.handleKey(character: chars, usbHid: hid, down: true)
+        session?.handleKey(character: chars, usbHid: hid, down: false)
+    }
+
+    /// Map UIKeyCommand.input strings to USB HID keyboard page usages.
+    private static func usbHidUsage(forKeyCommandInput input: String) -> Int {
+        if input.count == 1, let c = input.lowercased().first {
+            if c >= "a", c <= "z" {
+                return 0x04 + Int(c.asciiValue! - Character("a").asciiValue!)
+            }
+            if c >= "0", c <= "9" {
+                // HID: 1-9 = 0x1E..0x26, 0 = 0x27
+                if c == "0" { return 0x27 }
+                return 0x1E + Int(c.asciiValue! - Character("1").asciiValue!)
+            }
+            let punct: [Character: Int] = [
+                " ": 0x2C, "-": 0x2D, "=": 0x2E, "[": 0x2F, "]": 0x30,
+                "\\": 0x31, ";": 0x33, "'": 0x34, "`": 0x35, ",": 0x36,
+                ".": 0x37, "/": 0x38,
+            ]
+            if let u = punct[c] { return u }
+        }
+        if input == "\t" { return 0x2B }
+        if input == "\r" || input == "\n" { return 0x28 }
+        if input == UIKeyCommand.inputEscape { return 0x29 }
+        if input == UIKeyCommand.inputUpArrow { return 0x52 }
+        if input == UIKeyCommand.inputDownArrow { return 0x51 }
+        if input == UIKeyCommand.inputLeftArrow { return 0x50 }
+        if input == UIKeyCommand.inputRightArrow { return 0x4F }
+        if #available(iOS 15.0, *), input == UIKeyCommand.inputDelete { return 0x2A }
+        if input == "\u{7F}" { return 0x2A }
+        return 0
     }
 
     private static func buildPriorityCommands(action: Selector) -> [UIKeyCommand] {

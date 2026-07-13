@@ -105,8 +105,7 @@ struct RemoteSessionView: View {
         .disableKeyboardLayoutShift()
         .statusBarHidden(true)
         .onAppear {
-            session.captureSystemShortcuts = true
-            // Phone: rail visible, advanced tools in ⋯ panel (not a broken 2×2 rail).
+            // Phone: rail visible, advanced tools in ⋯ panel.
             if isCompact || isShortHeight {
                 sidebarExpanded = false
                 railHidden = false
@@ -134,7 +133,8 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity)
-        .background(Color.black)
+        // Transparent strip — only the capsule itself is tinted.
+        .background(Color.clear)
     }
 
     private var railRevealTab: some View {
@@ -183,9 +183,9 @@ struct RemoteSessionView: View {
                         systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
                         label: "Keyboard"
                     ) {
-                        let next = !session.softKeyboardVisible
-                        if next { session.captureSystemShortcuts = false }
-                        session.softKeyboardVisible = next
+                        // Soft keyboard uses UIKeyInput; HW shortcut capture pauses while it's up
+                        // but we no longer clear the preference permanently.
+                        session.softKeyboardVisible.toggle()
                     }
 
                     Button {
@@ -294,12 +294,6 @@ struct RemoteSessionView: View {
     @ViewBuilder
     private var advancedToolButtons: some View {
         sidebarIconButton(
-            systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
-            label: "Shortcuts"
-        ) {
-            session.captureSystemShortcuts.toggle()
-        }
-        sidebarIconButton(
             systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
             label: session.viewOnly ? "View only" : "Control"
         ) {
@@ -338,12 +332,6 @@ struct RemoteSessionView: View {
                 }
 
             VStack(alignment: .leading, spacing: 0) {
-                toolsPanelRow(
-                    systemName: session.captureSystemShortcuts ? "command.circle.fill" : "command.circle",
-                    title: session.captureSystemShortcuts ? "Shortcuts on" : "Shortcuts off"
-                ) {
-                    session.captureSystemShortcuts.toggle()
-                }
                 toolsPanelRow(
                     systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
                     title: session.viewOnly ? "View only" : "Control mode"

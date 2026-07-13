@@ -44,8 +44,8 @@ final class SessionController: ObservableObject {
     @Published var currentDisplayIndex: Int = 0
     /// Soft-keyboard toggle (bound by toolbar / Metal view).
     @Published var softKeyboardVisible: Bool = false
-    /// Steal iPadOS system shortcuts (⌘C etc.) when possible.
-    @Published var captureSystemShortcuts: Bool = true
+    /// Always capture HW system shortcuts (⌘C etc.) when possible — no UI toggle.
+    let captureSystemShortcuts: Bool = true
     /// Simple quality label for toolbar.
     @Published var qualityLabel: String = "Balanced"
     @Published var viewOnly: Bool = false
