@@ -11,6 +11,7 @@ struct RemoteSessionView: View {
         ZStack {
             Color.black.ignoresSafeArea()
 
+            // Full-bleed canvas — must remain the primary hit target for mouse/touch.
             MetalRemoteView(
                 session: session,
                 onSize: { size in
@@ -22,16 +23,21 @@ struct RemoteSessionView: View {
                 }
             )
             .ignoresSafeArea()
-
-            VStack(spacing: 0) {
+            // Overlays attach only to chrome edges so the canvas keeps receiving taps.
+            .overlay(alignment: .top) {
                 topBar
-                Spacer()
-                if toolbarExpanded {
-                    bottomBar
+                    .padding(.horizontal, 10)
+                    .padding(.top, 8)
+            }
+            .overlay(alignment: .bottom) {
+                Group {
+                    if toolbarExpanded {
+                        bottomBar
+                            .padding(.horizontal, 10)
+                            .padding(.bottom, 8)
+                    }
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
 
             if case .needPassword = session.phase {
                 passwordSheet
@@ -47,6 +53,7 @@ struct RemoteSessionView: View {
                     .foregroundStyle(.white)
                     .padding()
                     .background(.black.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+                    .allowsHitTesting(false)
             }
         }
         .statusBarHidden(true)
@@ -67,7 +74,7 @@ struct RemoteSessionView: View {
                 isPresented = false
             }
 
-            Spacer()
+            Spacer().allowsHitTesting(false)
 
             Text(session.statusText)
                 .font(.caption.weight(.medium))
@@ -76,6 +83,7 @@ struct RemoteSessionView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
                 .background(.black.opacity(0.45), in: Capsule())
+                .allowsHitTesting(false)
 
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
@@ -138,7 +146,7 @@ struct RemoteSessionView: View {
 
                 punchChip
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 0).allowsHitTesting(false)
 
                 if session.displayWidth > 0 {
                     Text("\(session.displayWidth)×\(session.displayHeight)")
@@ -147,6 +155,7 @@ struct RemoteSessionView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 6)
                         .background(.black.opacity(0.4), in: Capsule())
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -167,6 +176,7 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
         .background(.black.opacity(0.4), in: Capsule())
+        .allowsHitTesting(false)
         .accessibilityLabel(enableUdpPunch ? "UDP hole punch enabled" : "UDP hole punch disabled")
     }
 

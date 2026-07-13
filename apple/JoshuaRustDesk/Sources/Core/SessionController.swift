@@ -45,6 +45,8 @@ final class SessionController: ObservableObject {
     private var rememberPassword = false
     private var cursorCache: [String: (image: UIImage, hotx: CGFloat, hoty: CGFloat)] = [:]
     private var currentCursorId: String = ""
+    /// Only auto-disable view-only once per connection (don't fight user's toggle).
+    private var didEnsureControlMode = false
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
@@ -64,6 +66,7 @@ final class SessionController: ObservableObject {
         statusText = "Connecting to \(peerId)…"
         softKeyboardVisible = false
         viewOnly = false
+        didEnsureControlMode = false
         resetCursorState()
 
         RustDeskBridge.shared.pushNetworkOptionsToRust()
@@ -136,18 +139,27 @@ final class SessionController: ObservableObject {
     // MARK: - Pointer / view
 
     func sendMouseJSON(_ json: String) {
-        guard active, !viewOnly else { return }
+        guard active else { return }
+        // Still allow pointer when "view only" is out of sync; peer enforces permissions.
+        if viewOnly {
+            // Local-only: keep cursor feedback even if we skip sending (view-only).
+            updateCursorFromMouseJSON(json)
+            return
+        }
         rd_session_send_mouse(sessionUUID, json)
-        // Optimistic local cursor so the pointer tracks the finger immediately.
-        if let data = json.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            if let x = intValue(obj["x"]), let y = intValue(obj["y"]) {
-                cursorX = CGFloat(x)
-                cursorY = CGFloat(y)
-                if showRemoteCursor && !cursorEmbedded {
-                    cursorVisible = true
-                }
-            }
+        updateCursorFromMouseJSON(json)
+    }
+
+    private func updateCursorFromMouseJSON(_ json: String) {
+        guard let data = json.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let x = intValue(obj["x"]),
+              let y = intValue(obj["y"])
+        else { return }
+        cursorX = CGFloat(x)
+        cursorY = CGFloat(y)
+        if showRemoteCursor && !cursorEmbedded {
+            cursorVisible = true
         }
     }
 
@@ -237,7 +249,8 @@ final class SessionController: ObservableObject {
 
     func refreshToggleState() {
         guard active else { return }
-        viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
+        // Prefer control mode: if peer config left view-only on, turn it off once.
+        ensureControlMode()
         // Peer only streams cursor position/shape when this option is on (or view-only).
         ensureShowRemoteCursor()
         if let p = rd_session_get_image_quality(sessionUUID) {
@@ -249,6 +262,18 @@ final class SessionController: ObservableObject {
         }
     }
 
+    /// Ensure we are not stuck in view-only (blocks keyboard/mouse on peer).
+    private func ensureControlMode() {
+        if !didEnsureControlMode {
+            didEnsureControlMode = true
+            let vo = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
+            if vo {
+                rd_session_toggle_option(sessionUUID, "view-only")
+            }
+        }
+        viewOnly = rd_session_get_toggle_option(sessionUUID, "view-only") != 0
+    }
+
     /// Turn on show-remote-cursor so the peer sends CursorData / CursorPosition.
     private func ensureShowRemoteCursor() {
         let on = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
@@ -256,6 +281,10 @@ final class SessionController: ObservableObject {
             rd_session_toggle_option(sessionUUID, "show-remote-cursor")
         }
         showRemoteCursor = rd_session_get_toggle_option(sessionUUID, "show-remote-cursor") != 0
+        // Local overlay is on even before the first peer cursor_position arrives.
+        if showRemoteCursor && !cursorEmbedded {
+            cursorVisible = true
+        }
     }
 
     private func resetCursorState() {
@@ -293,9 +322,36 @@ final class SessionController: ObservableObject {
             w = max(1, Int(sqrt(Double(pixels))))
             h = max(1, pixels / w)
         }
+        // Soft-render path: adopt actual frame size when peer_info width was missing.
+        if w > 1, h > 1, (displayWidth != w || displayHeight != h) {
+            // Only auto-fill when unknown; don't fight multi-monitor switch.
+            if displayWidth <= 1 || displayHeight <= 1 {
+                displayWidth = w
+                displayHeight = h
+            }
+        }
         let data = Data(bytes: ptr, count: min(size, w * h * 4))
         rd_session_next_rgba(sessionUUID, 0)
         return (data, w, h)
+    }
+
+    private func parseDisplays(from obj: [String: Any]) {
+        // displays is a JSON-encoded string array of {width,height,...} (ints as NSNumber).
+        if let displays = obj["displays"] as? String,
+           let ddata = displays.data(using: .utf8),
+           let arr = try? JSONSerialization.jsonObject(with: ddata) as? [[String: Any]],
+           let first = arr.first {
+            if let w = intValue(first["width"]), w > 0 { displayWidth = w }
+            if let h = intValue(first["height"]), h > 0 { displayHeight = h }
+            if let emb = first["cursor_embedded"] {
+                cursorEmbedded = stringValue(emb) == "1" || intValue(emb) == 1
+            }
+        } else if let arr = obj["displays"] as? [[String: Any]], let first = arr.first {
+            if let w = intValue(first["width"]), w > 0 { displayWidth = w }
+            if let h = intValue(first["height"]), h > 0 { displayHeight = h }
+        }
+        if displayWidth == 0, let w = intValue(obj["width"]), w > 0 { displayWidth = w }
+        if displayHeight == 0, let h = intValue(obj["height"]), h > 0 { displayHeight = h }
     }
 
     private func releaseRetained() {
@@ -339,18 +395,8 @@ final class SessionController: ObservableObject {
         let name = obj["name"] as? String ?? ""
         switch name {
         case "peer_info":
-            if let displays = obj["displays"] as? String,
-               let ddata = displays.data(using: .utf8),
-               let arr = try? JSONSerialization.jsonObject(with: ddata) as? [[String: Any]],
-               let first = arr.first {
-                displayWidth = first["width"] as? Int ?? 0
-                displayHeight = first["height"] as? Int ?? 0
-            }
-            if displayWidth == 0 {
-                displayWidth = obj["width"] as? Int ?? displayWidth
-                displayHeight = obj["height"] as? Int ?? displayHeight
-            }
-            statusText = "Peer ready"
+            parseDisplays(from: obj)
+            statusText = "Peer ready \(displayWidth)×\(displayHeight)"
             refreshToggleState()
         case "input-password", "session-login-password", "password":
             phase = .needPassword

@@ -268,6 +268,8 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         softField.textColor = .clear
         softField.backgroundColor = .clear
         softField.isHidden = false
+        // Do not steal canvas taps; still works as first-responder for soft keyboard.
+        softField.isUserInteractionEnabled = false
         softField.text = softSentinel
         softField.translatesAutoresizingMaskIntoConstraints = false
         addSubview(softField)
@@ -639,15 +641,15 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        let all = event?.touches(for: self) ?? touches
-        let active = all.filter { $0.phase == .began || $0.phase == .moved || $0.phase == .stationary }
+        let fingerCount = activeTouches.count
 
-        if active.count >= 2 {
+        if fingerCount >= 2 {
             isPinching = false
             isTwoFingerPanning = true
-            lastTwoFingerMid = midpoint(of: active)
+            lastTwoFingerMid = midpoint(of: Set(activeTouches.keys))
             pinchStartZoom = userZoom
             panStartOffset = panOffset
+            pinchStartDistance = 0
             // End any pending left-button drag
             if let p = touches.first.map({ $0.location(in: self) }) {
                 sendMouse(type: "up", point: p, buttons: "left")
@@ -655,9 +657,11 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
             return
         }
 
+        // Single finger: left-button down (restore simple reliable path).
+        isPinching = false
+        isTwoFingerPanning = false
         if let t = touches.first {
-            let p = t.location(in: self)
-            sendMouse(type: "down", point: p, buttons: "left")
+            sendMouse(type: "down", point: t.location(in: self), buttons: "left")
         }
     }
 
@@ -665,28 +669,25 @@ final class TouchMetalView: MTKView, UITextFieldDelegate {
         for t in touches {
             activeTouches[t] = t.location(in: self)
         }
-        let all = event?.touches(for: self) ?? touches
-        let active = all.filter { $0.phase == .began || $0.phase == .moved || $0.phase == .stationary }
-
-        if active.count >= 2 {
-            handleMultiTouch(active)
+        if activeTouches.count >= 2 || isPinching || isTwoFingerPanning {
+            handleMultiTouch(Set(activeTouches.keys))
             return
         }
-
-        if !isPinching, !isTwoFingerPanning, let t = touches.first {
+        if let t = touches.first {
             sendMouse(type: "move", point: t.location(in: self), buttons: "")
         }
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        let wasMulti = isPinching || isTwoFingerPanning || activeTouches.count > 1
         for t in touches { activeTouches.removeValue(forKey: t) }
-        let remaining = activeTouches.keys.count
 
-        if isPinching || isTwoFingerPanning {
-            if remaining < 2 {
+        if wasMulti {
+            if activeTouches.count < 2 {
                 isPinching = false
                 isTwoFingerPanning = false
                 lastTwoFingerMid = nil
+                pinchStartDistance = 0
                 wheelAccumulator = 0
             }
             return
