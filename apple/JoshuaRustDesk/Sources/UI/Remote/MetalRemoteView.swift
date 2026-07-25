@@ -351,6 +351,10 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
                     self?.session?.clickAtCursor(button: "left")
                 }
             }
+        case .leftDownAtCursor:
+            session?.mouseButtonAtCursor(type: "down", button: "left")
+        case .leftUpAtCursor:
+            session?.mouseButtonAtCursor(type: "up", button: "left")
         case .rightClickAtCursor:
             session?.clickAtCursor(button: "right")
         case .wheel(let x, let y):

@@ -22,6 +22,8 @@ enum RemoteGestureAction: Equatable {
     /// Cursor-mode trackpad delta (view points).
     case moveCursor(dx: CGFloat, dy: CGFloat)
     case leftClickAtCursor(count: Int)
+    case leftDownAtCursor
+    case leftUpAtCursor
     case rightClickAtCursor
     /// Discrete wheel notches (Flutter contract: ±1).
     case wheel(x: Int, y: Int)
@@ -47,8 +49,8 @@ protocol RemoteGestureEngineDelegate: AnyObject {
 /// |---|---|---|
 /// | 1-finger tap | left at finger | left at cursor |
 /// | 1-finger double-tap | double left at finger | double left at cursor |
-/// | 1-finger long-press | right at finger | right at cursor |
-/// | 1-finger drag | left-drag absolute | move cursor |
+/// | 1-finger double-tap + hold + drag | left-drag (trackpad style) | left-drag at cursor |
+/// | 1-finger drag | left-drag absolute | move cursor (no button) |
 /// | 2-finger tap | right at centroid | right at cursor |
 /// | 2-finger double-tap | reset zoom | reset zoom |
 /// | 2-finger pan (any zoom) | mouse scroll wheel | mouse scroll wheel |
@@ -66,9 +68,6 @@ final class RemoteGestureEngine {
 
     struct Config {
         var dragSlop: CGFloat = 12
-        /// Looser than dragSlop so a steady hold still counts as long-press.
-        var longPressSlop: CGFloat = 20
-        var longPress: CFTimeInterval = 0.42
         var doubleTapInterval: CFTimeInterval = 0.30
         var doubleTapDistance: CGFloat = 40
         /// Centroid-only budget for two-finger tap (per-finger jitter ignored).
@@ -107,7 +106,10 @@ final class RemoteGestureEngine {
         var t0: CFTimeInterval
         var maxTravel: CGFloat
         var dragging: Bool
-        var longPressFired: Bool
+        /// Second tap of a double-tap sequence (candidate for double-click or tap-drag).
+        var isSecondTap: Bool
+        /// Left button is currently held (absolute or at-cursor).
+        var buttonHeld: Bool
     }
 
     private struct Multi: Equatable {
@@ -136,7 +138,6 @@ final class RemoteGestureEngine {
     private var state: State = .idle
     private var epochMode: RemoteInputMode = .touch
     private var active: [ObjectIdentifier: CGPoint] = [:]
-    private var longPressWork: DispatchWorkItem?
     private var twoFingerTapWork: DispatchWorkItem?
     private var oneFingerTapWork: DispatchWorkItem?
     private var lastOneTap: (t: CFTimeInterval, p: CGPoint)?
@@ -175,7 +176,12 @@ final class RemoteGestureEngine {
             active.removeValue(forKey: ObjectIdentifier(t))
         }
         cancelTimers()
-        if case .one(let o) = state, o.dragging {
+        if case .one(let o) = state, o.buttonHeld {
+            switch epochMode {
+            case .touch: emit(.leftUp(point: o.last))
+            case .cursor: emit(.leftUpAtCursor)
+            }
+        } else if case .one(let o) = state, o.dragging, epochMode == .touch {
             emit(.leftUp(point: o.last))
         }
         state = .idle
@@ -211,11 +217,15 @@ final class RemoteGestureEngine {
 
         case .one(var o):
             if remaining >= 2 || (n >= 2 && ending.isEmpty) {
-                // Second finger: promote to multi, release any drag.
-                cancelLongPress()
-                if o.dragging {
+                // Second finger: promote to multi, release any held left button.
+                if o.buttonHeld {
+                    switch epochMode {
+                    case .touch: emit(.leftUp(point: o.last))
+                    case .cursor: emit(.leftUpAtCursor)
+                    }
+                    o.buttonHeld = false
+                } else if o.dragging, epochMode == .touch {
                     emit(.leftUp(point: o.last))
-                    o.dragging = false
                 }
                 beginMulti()
                 return
@@ -232,19 +242,25 @@ final class RemoteGestureEngine {
             let dy = p.y - o.last.y
             o.last = p
 
-            if o.longPressFired {
-                state = .one(o)
-                return
-            }
-
             if !o.dragging, o.maxTravel > config.dragSlop {
-                cancelLongPress()
                 o.dragging = true
                 switch epochMode {
                 case .touch:
-                    emit(.leftDown(point: o.start))
+                    // Absolute left-drag (first drag or double-tap-drag).
+                    if !o.buttonHeld {
+                        emit(.leftDown(point: o.start))
+                        o.buttonHeld = true
+                    }
                     emit(.hover(point: p))
                 case .cursor:
+                    if o.isSecondTap {
+                        // Trackpad double-tap-and-hold drag: hold left button while moving.
+                        if !o.buttonHeld {
+                            emit(.leftDownAtCursor)
+                            o.buttonHeld = true
+                            emit(.haptic(.light))
+                        }
+                    }
                     emit(.moveCursor(dx: dx, dy: dy))
                 }
             } else if o.dragging {
@@ -255,7 +271,7 @@ final class RemoteGestureEngine {
                     emit(.moveCursor(dx: dx, dy: dy))
                 }
             } else {
-                // Still possible tap / long-press.
+                // Still possible tap / double-tap / double-tap-hold.
                 switch epochMode {
                 case .touch:
                     emit(.hover(point: p))
@@ -302,12 +318,14 @@ final class RemoteGestureEngine {
         guard let (id, p) = active.first else { return }
         epochMode = preferredMode
         let now = CACurrentMediaTime()
-        // Second tap of a double-tap: cancel the delayed single-click immediately.
+        // Second tap of a double-tap sequence (double-click or double-tap-and-hold drag).
+        var isSecond = false
         if let last = lastOneTap,
            now - last.t < config.doubleTapInterval,
            hypot(p.x - last.p.x, p.y - last.p.y) < config.doubleTapDistance {
             oneFingerTapWork?.cancel()
             oneFingerTapWork = nil
+            isSecond = true
         }
         let o = OneFinger(
             id: id,
@@ -316,38 +334,39 @@ final class RemoteGestureEngine {
             t0: now,
             maxTravel: 0,
             dragging: false,
-            longPressFired: false
+            isSecondTap: isSecond,
+            buttonHeld: false
         )
         state = .one(o)
         if epochMode == .touch {
             emit(.hover(point: p))
         }
-        armLongPress()
     }
 
     private func endOneFinger(_ o: OneFinger) {
-        cancelLongPress()
-        if o.longPressFired {
+        // Trackpad double-tap-and-hold drag (or absolute left-drag): release button.
+        if o.buttonHeld {
+            switch epochMode {
+            case .touch: emit(.leftUp(point: o.last))
+            case .cursor: emit(.leftUpAtCursor)
+            }
+            lastOneTap = nil
             state = .idle
             return
         }
         if o.dragging {
-            if epochMode == .touch {
-                emit(.leftUp(point: o.last))
-            }
+            // Cursor-mode free move (no button) — nothing to release.
+            lastOneTap = nil
             state = .idle
             return
         }
-        // Clean tap — delay single click so a second tap can become double-click
-        // without emitting an extra single click first.
+
         let now = CACurrentMediaTime()
         let point = o.start
         let mode = epochMode
-        if let last = lastOneTap,
-           now - last.t < config.doubleTapInterval,
-           hypot(point.x - last.p.x, point.y - last.p.y) < config.doubleTapDistance {
-            oneFingerTapWork?.cancel()
-            oneFingerTapWork = nil
+
+        // Second clean tap without drag → double-click.
+        if o.isSecondTap {
             lastOneTap = nil
             switch mode {
             case .touch: emit(.leftClick(point: point, count: 2))
@@ -356,6 +375,9 @@ final class RemoteGestureEngine {
             state = .idle
             return
         }
+
+        // First clean tap — delay single click so a second tap can become
+        // double-click or double-tap-and-hold drag.
         lastOneTap = (now, point)
         oneFingerTapWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -371,44 +393,9 @@ final class RemoteGestureEngine {
         state = .idle
     }
 
-    private func armLongPress() {
-        cancelLongPress()
-        let work = DispatchWorkItem { [weak self] in
-            self?.fireLongPress()
-        }
-        longPressWork = work
-        // `.common` so it fires during tracking (unlike default-mode Timer).
-        DispatchQueue.main.asyncAfter(deadline: .now() + config.longPress, execute: work)
-    }
-
-    private func fireLongPress() {
-        longPressWork = nil
-        guard case .one(var o) = state, !o.dragging, !o.longPressFired else { return }
-        // Hold still enough — slightly looser than drag slop so a steady press works.
-        guard o.maxTravel <= config.longPressSlop else { return }
-        o.longPressFired = true
-        state = .one(o)
-        // Tap-and-hold → right-click (remote context menu).
-        switch epochMode {
-        case .touch:
-            emit(.rightClick(point: o.start))
-        case .cursor:
-            emit(.rightClickAtCursor)
-        }
-        emit(.haptic(.medium))
-        // Swallow residual motion until all fingers up.
-        state = .done
-    }
-
-    private func cancelLongPress() {
-        longPressWork?.cancel()
-        longPressWork = nil
-    }
-
     // MARK: Multi finger
 
     private func beginMulti() {
-        cancelLongPress()
         twoFingerTapWork?.cancel()
         twoFingerTapWork = nil
         guard active.count >= 2 else { return }
@@ -578,7 +565,6 @@ final class RemoteGestureEngine {
     }
 
     private func cancelTimers() {
-        cancelLongPress()
         twoFingerTapWork?.cancel()
         twoFingerTapWork = nil
         oneFingerTapWork?.cancel()
