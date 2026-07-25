@@ -46,13 +46,18 @@ struct RemoteSessionView: View {
                     portraitLayout(bottomInset: bottomSafe, topInset: topSafe)
                 } else {
                     ZStack(alignment: .leading) {
-                        remoteCanvas(isPortrait: false, showsRailReveal: true)
+                        remoteCanvas(
+                            isPortrait: false,
+                            showsRailReveal: true,
+                            topSafe: topSafe
+                        )
                             .padding(.bottom, keyboardOverlap)
 
                         if !railHidden {
                             sidecarSidebar(
                                 bottomInset: max(bottomSafe, 10),
-                                topInset: isCompact ? 8 : max(topSafe, 8)
+                                // Keep rail below Dynamic Island / status region on phones.
+                                topInset: max(topSafe, isCompact ? 12 : 8)
                             )
                             .frame(width: sidebarWidth)
                             .frame(maxHeight: .infinity)
@@ -118,6 +123,11 @@ struct RemoteSessionView: View {
                 showToolsPanel = false
             }
         }
+        .onChange(of: session.phase) { phase in
+            if case .closed = phase {
+                isPresented = false
+            }
+        }
         .onDisappear {
             session.softKeyboardVisible = false
             showToolsPanel = false
@@ -126,7 +136,7 @@ struct RemoteSessionView: View {
 
     private func portraitLayout(bottomInset: CGFloat, topInset: CGFloat) -> some View {
         ZStack {
-            remoteCanvas(isPortrait: true, showsRailReveal: false)
+            remoteCanvas(isPortrait: true, showsRailReveal: false, topSafe: topInset)
             portraitTopBar(topInset: topInset)
                 .frame(maxHeight: .infinity, alignment: .top)
                 .opacity(showToolsPanel ? 0 : 1)
@@ -141,7 +151,20 @@ struct RemoteSessionView: View {
         .padding(.bottom, keyboardOverlap)
     }
 
-    private func remoteCanvas(isPortrait: Bool, showsRailReveal: Bool) -> some View {
+    /// Top padding so the quality HUD clears Dynamic Island / notch.
+    /// Portrait also clears the esc/power strip that lives in the top safe band.
+    private func hudTopInset(isPortrait: Bool, topSafe: CGFloat) -> CGFloat {
+        if isPortrait {
+            return max(topSafe, 52) + 6
+        }
+        return max(topSafe, 12) + 6
+    }
+
+    private func remoteCanvas(
+        isPortrait: Bool,
+        showsRailReveal: Bool,
+        topSafe: CGFloat
+    ) -> some View {
         ZStack {
             MetalRemoteView(
                 session: session,
@@ -164,10 +187,11 @@ struct RemoteSessionView: View {
                             hudPill
                         }
                         .padding(.horizontal, 10)
-                        .padding(.top, 8)
+                        .padding(.top, hudTopInset(isPortrait: isPortrait, topSafe: topSafe))
                         .allowsHitTesting(false)
                     } else {
                         topChromeIPad
+                            .padding(.top, max(topSafe, 8))
                     }
                 }
                 Spacer(minLength: 0)
@@ -192,6 +216,7 @@ struct RemoteSessionView: View {
             if session.phase == .connecting {
                 connectingOverlay
             }
+
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
