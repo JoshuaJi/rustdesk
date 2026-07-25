@@ -127,7 +127,8 @@ struct HomeView: View {
         )
         .onChange(of: showRemote) { presented in
             if !presented {
-                session.close()
+                // Tear down without re-entering leave callback loops.
+                session.userLeaveRemoteUI()
                 recents.reloadFromRust()
                 if case .failed(let msg) = session.phase {
                     connectError = msg
@@ -149,8 +150,14 @@ struct HomeView: View {
             // Auto-reconnect keeps the remote UI up (phase stays `.connecting`).
         }
         .onAppear {
+            session.onRequestLeaveSession = {
+                showRemote = false
+            }
             recents.load()
             recents.reloadFromRust()
+        }
+        .onDisappear {
+            session.onRequestLeaveSession = nil
         }
     }
 

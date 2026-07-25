@@ -172,34 +172,59 @@ struct RemoteSessionPresenter: UIViewControllerRepresentable {
     func updateUIViewController(_ anchor: UIViewController, context: Context) {
         let coordinator = context.coordinator
         if isPresented {
-            if coordinator.host == nil, anchor.presentedViewController == nil {
-                let binding = $isPresented
-                let root = RemoteSessionView(session: session, isPresented: binding)
-                let host = RemoteSessionHostController(rootView: root)
+            if coordinator.host == nil {
+                // Dismiss any stale presentation first.
+                if anchor.presentedViewController != nil {
+                    anchor.dismiss(animated: false)
+                }
+                let host = RemoteSessionHostController(
+                    rootView: RemoteSessionView(session: session, isPresented: $isPresented)
+                )
                 coordinator.host = host
+                coordinator.presentGeneration &+= 1
+                let gen = coordinator.presentGeneration
                 // Present after the current runloop so the anchor is in the window.
                 DispatchQueue.main.async {
-                    guard isPresented, anchor.presentedViewController == nil else { return }
+                    // Invalidate if disconnect already fired or a newer present was requested.
+                    guard coordinator.presentGeneration == gen,
+                          coordinator.host === host,
+                          anchor.presentedViewController == nil
+                    else { return }
+                    // Re-check binding via coordinator flag set on each update.
+                    guard coordinator.wantsPresented else {
+                        coordinator.host = nil
+                        return
+                    }
                     anchor.present(host, animated: true)
                 }
             } else if let host = coordinator.host {
                 // Keep rootView's binding/session fresh.
                 host.rootView = RemoteSessionView(session: session, isPresented: $isPresented)
             }
+            coordinator.wantsPresented = true
         } else {
+            coordinator.wantsPresented = false
+            coordinator.presentGeneration &+= 1 // cancel any in-flight present
+            SoftKeyboardHost.shared.hide(notify: false)
             if let host = coordinator.host {
-                SoftKeyboardHost.shared.hide(notify: false)
+                coordinator.host = nil
                 if host.presentingViewController != nil {
                     host.dismiss(animated: true)
+                } else if anchor.presentedViewController != nil {
+                    // Presentation may still be settling; dismiss whatever is up.
+                    anchor.dismiss(animated: true)
                 }
-                coordinator.host = nil
-            } else if let presented = anchor.presentedViewController {
-                presented.dismiss(animated: true)
+            } else if anchor.presentedViewController != nil {
+                anchor.dismiss(animated: true)
             }
         }
     }
 
     final class Coordinator {
         var host: RemoteSessionHostController?
+        /// Bumped to cancel a pending async `present` after disconnect.
+        var presentGeneration: UInt = 0
+        /// Mirrors latest `isPresented` for the async present guard.
+        var wantsPresented = false
     }
 }

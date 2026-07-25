@@ -284,13 +284,34 @@ final class SessionController: ObservableObject {
         statusText = "Logging in…"
     }
 
+    /// Called on the main queue when the user leaves a session (disconnect / cancel).
+    /// Home uses this to dismiss remote UI even if presentation bindings are sticky.
+    var onRequestLeaveSession: (() -> Void)?
+
     /// User-facing disconnect — stops auto-reconnect and tears the session down.
     func close() {
+        leaveSession(requestUILeave: true)
+    }
+
+    /// Tear down after remote UI already dismissed (avoid re-entrant leave callback).
+    func userLeaveRemoteUI() {
+        leaveSession(requestUILeave: false)
+    }
+
+    private func leaveSession(requestUILeave: Bool) {
         userInitiatedClose = true
         cancelReconnect()
         tearDownTransport(markClosed: true)
         statusText = "Disconnected"
         connectionStage = ""
+        guard requestUILeave else { return }
+        // Always ask the shell to leave remote UI (back to home).
+        let leave = onRequestLeaveSession
+        if Thread.isMainThread {
+            leave?()
+        } else {
+            DispatchQueue.main.async { leave?() }
+        }
     }
 
     private func setStage(_ text: String) {

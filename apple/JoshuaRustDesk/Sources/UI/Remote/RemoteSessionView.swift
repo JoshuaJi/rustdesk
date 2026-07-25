@@ -619,9 +619,17 @@ struct RemoteSessionView: View {
 
     private var disconnectControl: some View {
         sidebarIconButton(systemName: "xmark", label: "Disconnect") {
-            session.close()
-            isPresented = false
+            leaveSessionToHome()
         }
+    }
+
+    /// Disconnect + dismiss full-screen remote UI back to home.
+    private func leaveSessionToHome() {
+        controlBarShowsTools = false
+        session.softKeyboardVisible = false
+        SoftKeyboardHost.shared.hide(notify: false)
+        session.close()
+        isPresented = false
     }
 
     /// Keys zone: Tab (leftmost) | sticky modifiers.
@@ -916,8 +924,7 @@ struct RemoteSessionView: View {
                     .foregroundStyle(.white.opacity(0.65))
             }
             Button("Cancel") {
-                session.close()
-                isPresented = false
+                leaveSessionToHome()
             }
             .buttonStyle(.bordered)
             .tint(.white)
@@ -943,8 +950,7 @@ struct RemoteSessionView: View {
                 }
             HStack(spacing: 12) {
                 Button("Cancel") {
-                    session.close()
-                    isPresented = false
+                    leaveSessionToHome()
                 }
                 .buttonStyle(.bordered)
                 .tint(.white)
@@ -978,8 +984,7 @@ struct RemoteSessionView: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 12) {
                 Button("Close") {
-                    session.close()
-                    isPresented = false
+                    leaveSessionToHome()
                 }
                 .buttonStyle(.bordered)
                 .tint(.white)
