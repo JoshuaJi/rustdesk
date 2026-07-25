@@ -58,6 +58,8 @@ targets:
           - -framework
           - Security
           - -framework
+          - LocalAuthentication
+          - -framework
           - SystemConfiguration
           - -framework
           - AudioToolbox

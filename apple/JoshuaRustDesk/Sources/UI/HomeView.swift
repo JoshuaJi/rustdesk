@@ -11,7 +11,10 @@ struct HomeView: View {
     @State private var password = ""
     @State private var showRemote = false
     @State private var showNewConnection = false
+    @State private var connectAfterSheetDismiss = false
     @State private var connectError: String?
+    @State private var credentialPeerId = ""
+    @State private var showCredentialReset = false
     @AppStorage("force_relay") private var forceRelay = false
     @AppStorage("remember_password") private var rememberPassword = true
 
@@ -46,6 +49,7 @@ struct HomeView: View {
                         peerId = ""
                         password = ""
                         connectError = nil
+                        connectAfterSheetDismiss = false
                         showNewConnection = true
                     }
 
@@ -76,7 +80,28 @@ struct HomeView: View {
             .padding(.top, 8)
         }
         .background(Color(uiColor: .systemGroupedBackground).ignoresSafeArea())
-        .sheet(isPresented: $showNewConnection) {
+        .confirmationDialog(
+            "Reset saved computer login password?",
+            isPresented: $showCredentialReset,
+            titleVisibility: .visible
+        ) {
+            Button("Reset Saved Password", role: .destructive) {
+                RemoteLockCredentialStore.shared.remove(for: credentialPeerId)
+                credentialPeerId = ""
+            }
+            Button("Cancel", role: .cancel) {
+                credentialPeerId = ""
+            }
+        } message: {
+            Text(
+                "This is the user-account login password on the remote computer, not its Portico/RustDesk connection password. Portico will ask for a new one the next time you unlock that computer."
+            )
+        }
+        .sheet(isPresented: $showNewConnection, onDismiss: {
+            guard connectAfterSheetDismiss else { return }
+            connectAfterSheetDismiss = false
+            startConnect(id: trimmedPeerId, password: password, forceRelay: forceRelay)
+        }) {
             NewConnectionSheet(
                 peerId: $peerId,
                 password: $password,
@@ -85,10 +110,13 @@ struct HomeView: View {
                 isConnecting: session.phase == .connecting,
                 canConnect: canConnect,
                 onConnect: {
-                    startConnect(id: trimmedPeerId, password: password, forceRelay: forceRelay)
+                    connectAfterSheetDismiss = true
                     showNewConnection = false
                 },
-                onCancel: { showNewConnection = false }
+                onCancel: {
+                    connectAfterSheetDismiss = false
+                    showNewConnection = false
+                }
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
@@ -209,6 +237,7 @@ struct HomeView: View {
             peerId = peer.id
             if !peer.lastPassword.isEmpty { password = peer.lastPassword }
             forceRelay = peer.forceRelay || forceRelay
+            connectAfterSheetDismiss = false
             showNewConnection = true
         } label: {
             Label("Edit & connect", systemImage: "square.and.pencil")
@@ -217,6 +246,12 @@ struct HomeView: View {
             UIPasteboard.general.string = peer.id
         } label: {
             Label("Copy ID", systemImage: "doc.on.doc")
+        }
+        Button {
+            credentialPeerId = peer.id
+            showCredentialReset = true
+        } label: {
+            Label("Reset computer login password…", systemImage: "key.slash")
         }
         Button(role: .destructive) {
             recents.remove(peer.id)

@@ -3499,6 +3499,17 @@ pub fn input_os_password(p: String, activate: bool, interface: impl Interface) {
     });
 }
 
+/// Send a single Legacy control-key press (down+up) to the peer.
+fn send_legacy_control_key(interface: &impl Interface, key: ControlKey) {
+    let mut key_event = KeyEvent::new();
+    key_event.mode = KeyboardMode::Legacy.into();
+    key_event.press = true;
+    key_event.set_control_key(key);
+    let mut msg_out = Message::new();
+    msg_out.set_key_event(key_event);
+    interface.send(Data::Message(msg_out));
+}
+
 /// Input the OS's password.
 ///
 /// # Arguments
@@ -3511,11 +3522,18 @@ fn _input_os_password(p: String, activate: bool, interface: impl Interface) {
     if activate {
         // Click event is used to bring up the password input box.
         activate_os(&interface, input_password);
-        std::thread::sleep(Duration::from_millis(1200));
+        // Wait for the lock-screen password field to become focused.
+        std::thread::sleep(Duration::from_millis(1500));
     }
     if !input_password {
         return;
     }
+    // Clear any pre-filled / residual characters (failed prior attempts, soft-keyboard leaks).
+    for _ in 0..48 {
+        send_legacy_control_key(&interface, ControlKey::Backspace);
+    }
+    std::thread::sleep(Duration::from_millis(80));
+
     let mut key_event = KeyEvent::new();
     key_event.mode = KeyboardMode::Legacy.into();
     key_event.press = true;
@@ -3523,6 +3541,8 @@ fn _input_os_password(p: String, activate: bool, interface: impl Interface) {
     key_event.set_seq(p);
     msg_out.set_key_event(key_event.clone());
     interface.send(Data::Message(msg_out.clone()));
+    // Give the password field time to accept the sequence before submitting.
+    std::thread::sleep(Duration::from_millis(120));
     key_event.set_control_key(ControlKey::Return);
     msg_out.set_key_event(key_event);
     interface.send(Data::Message(msg_out));

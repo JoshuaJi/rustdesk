@@ -7,16 +7,20 @@ import UIKit
 /// SwiftUI `fullScreenCover` + `.ignoresSafeArea(.keyboard)` is insufficient: UIKit still
 /// applies keyboard safe-area insets to the presentation hosting controller, which pushes
 /// the whole HStack (sidebar + canvas) upward. This controller:
-/// 1. Excludes `.keyboard` from `safeAreaRegions` (iOS 16.4+)
-/// 2. Forces `view.frame = window.bounds` on every layout pass while active
-/// 3. Leaves the canvas to inset itself by the measured keyboard overlap
-/// 4. Is presented with `.overFullScreen` so the home stack is not resized either
+/// 1. Owns status-bar appearance so the remote session is genuinely full-screen
+/// 2. Excludes `.keyboard` from `safeAreaRegions` (iOS 16.4+)
+/// 3. Forces `view.frame = window.bounds` on every layout pass while active
+/// 4. Leaves the canvas to inset itself by the measured keyboard overlap
+/// 5. Is presented with `.fullScreen` so it owns the scene's status-bar policy
 final class RemoteSessionHostController: UIHostingController<RemoteSessionView> {
     private var keyboardObservers: [NSObjectProtocol] = []
 
+    override var prefersStatusBarHidden: Bool { true }
+
     override init(rootView: RemoteSessionView) {
         super.init(rootView: rootView)
-        modalPresentationStyle = .overFullScreen
+        modalPresentationStyle = .fullScreen
+        modalPresentationCapturesStatusBarAppearance = true
         modalTransitionStyle = .crossDissolve
         view.backgroundColor = .black
     }
@@ -38,12 +42,14 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        setNeedsStatusBarAppearanceUpdate()
         disableKeyboardSafeArea()
         installKeyboardObservers()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        setNeedsStatusBarAppearanceUpdate()
         disableKeyboardSafeArea()
         forceFullWindowFrame()
     }
@@ -63,6 +69,22 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         forceFullWindowFrame()
+    }
+
+    override func viewWillTransition(
+        to size: CGSize,
+        with coordinator: UIViewControllerTransitionCoordinator
+    ) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: { [weak self] _ in
+            self?.disableKeyboardSafeArea()
+            self?.forceFullWindowFrame()
+        }, completion: { [weak self] _ in
+            self?.disableKeyboardSafeArea()
+            self?.forceFullWindowFrame()
+            self?.view.setNeedsLayout()
+            self?.view.layoutIfNeeded()
+        })
     }
 
     private func disableKeyboardSafeArea() {

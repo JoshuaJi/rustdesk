@@ -7,9 +7,10 @@ use crate::{
     flutter::{self, session_add, session_start_native},
     flutter_ffi::{
         main_init, session_change_prefer_codec, session_close, session_get_image_quality,
-        session_get_toggle_option, session_input_key, session_input_string, session_login,
-        session_change_resolution, session_peer_option, session_send_mouse,
-        session_set_image_quality, session_set_size, session_toggle_option, SessionID,
+        session_get_toggle_option, session_input_key, session_input_os_password,
+        session_input_string, session_lock_screen, session_login, session_change_resolution,
+        session_peer_option, session_send_mouse, session_set_image_quality, session_set_size,
+        session_toggle_option, SessionID,
     },
     ui_interface::{get_id, get_option, peer_to_map, set_option},
 };
@@ -251,6 +252,30 @@ pub extern "C" fn rd_session_input_string(session_uuid: *const c_char, value: *c
         return;
     };
     session_input_string(sid, cstring_or_empty(value));
+}
+
+#[no_mangle]
+pub extern "C" fn rd_session_lock_screen(session_uuid: *const c_char) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    session_lock_screen(sid);
+}
+
+/// Wake the peer login UI and type the OS account password (same path as Flutter desktop).
+#[no_mangle]
+pub extern "C" fn rd_session_input_os_password(
+    session_uuid: *const c_char,
+    password: *const c_char,
+) {
+    let Some(sid) = parse_session_id(session_uuid) else {
+        return;
+    };
+    let password = cstring_or_empty(password);
+    if password.is_empty() {
+        return;
+    }
+    session_input_os_password(sid, password);
 }
 
 /// Push text into the remote peer's system clipboard (true clipboard sync).

@@ -12,11 +12,18 @@ struct RemoteSessionView: View {
     @State private var sidebarExpanded = true
     /// Fully hide the rail on compact (edge tab restores it).
     @State private var railHidden = false
-    /// Compact overflow tools panel (replaces SwiftUI `Menu`, which is dead under overFullScreen).
+    /// Compact overflow tools panel (the modal host needs directly tappable controls).
     @State private var showToolsPanel = false
     /// Bottom-anchored system keyboard overlap reported by the UIKit layout bridge.
     @State private var keyboardOverlap: CGFloat = 0
+    @State private var remoteScreenLocked = false
+    @State private var isAuthenticatingUnlock = false
+    @State private var showLockPasswordPrompt = false
+    @State private var lockPassword = ""
+    @State private var lockStatusMessage = ""
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
+
+    private let lockCredentialStore = RemoteLockCredentialStore.shared
 
     private var isCompact: Bool { hSize == .compact }
     /// Phone landscape: short height — keep advanced tools collapsed.
@@ -32,83 +39,72 @@ struct RemoteSessionView: View {
         GeometryReader { geo in
             let bottomSafe = geo.safeAreaInsets.bottom
             let topSafe = geo.safeAreaInsets.top
+            let isPortrait = geo.size.height >= geo.size.width
 
-            HStack(spacing: 0) {
-                if !railHidden {
-                    sidecarSidebar(bottomInset: max(bottomSafe, 10), topInset: isCompact ? 8 : max(topSafe, 8))
-                        .frame(width: sidebarWidth)
-                        .frame(maxHeight: .infinity)
-                        .background(Color.black.opacity(0.92))
-                }
+            Group {
+                if isPortrait {
+                    portraitLayout(bottomInset: bottomSafe, topInset: topSafe)
+                } else {
+                    ZStack(alignment: .leading) {
+                        remoteCanvas(isPortrait: false, showsRailReveal: true)
+                            .padding(.bottom, keyboardOverlap)
 
-                // Canvas + HUD. On iPhone: full canvas with floating status.
-                ZStack {
-                    MetalRemoteView(
-                        session: session,
-                        onSize: { size in
-                            guard !session.softKeyboardVisible else { return }
-                            let s = UIScreen.main.scale
-                            session.setViewSize(
-                                width: Int(size.width * s),
-                                height: Int(size.height * s)
+                        if !railHidden {
+                            sidecarSidebar(
+                                bottomInset: max(bottomSafe, 10),
+                                topInset: isCompact ? 8 : max(topSafe, 8)
                             )
+                            .frame(width: sidebarWidth)
+                            .frame(maxHeight: .infinity)
+                            .padding(.bottom, keyboardOverlap)
+                            .opacity(showToolsPanel ? 0 : 1)
+                            .allowsHitTesting(!showToolsPanel)
                         }
-                    )
-                    .padding(.horizontal, isCompact ? 0 : 10)
-                    .padding(.bottom, isCompact ? 0 : 10)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .ignoresSafeArea(.keyboard)
-
-                    VStack(spacing: 0) {
-                        if session.showQualityHUD {
-                            if isCompact {
-                                HStack(spacing: 0) {
-                                    Spacer(minLength: 0)
-                                    hudPill
-                                }
-                                .padding(.horizontal, 10)
-                                .padding(.top, 8)
-                                .allowsHitTesting(false)
-                            } else {
-                                topChromeIPad
-                            }
-                        }
-                        Spacer(minLength: 0)
-                    }
-                    .animation(.easeOut(duration: 0.15), value: session.showQualityHUD)
-
-                    if railHidden {
-                        railRevealTab
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                    }
-
-                    if showToolsPanel {
-                        toolsPanelOverlay
-                    }
-
-                    if case .needPassword = session.phase {
-                        passwordSheet
-                    }
-                    if case .failed(let msg) = session.phase {
-                        failureOverlay(msg)
-                    }
-                    if session.phase == .connecting {
-                        connectingOverlay
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
-                .ignoresSafeArea(.keyboard)
-                // Keep the desktop fitted into all space above a docked keyboard.
-                // Floating iPad keyboards report no bottom overlap.
-                .padding(.bottom, keyboardOverlap)
+            }
+            .onAppear {
+                showKeyboardWhenReady(isPortrait: isPortrait, phase: session.phase)
+            }
+            .onChange(of: isPortrait) { portrait in
+                showKeyboardWhenReady(isPortrait: portrait, phase: session.phase)
+            }
+            .onChange(of: session.phase) { phase in
+                showKeyboardWhenReady(isPortrait: isPortrait, phase: phase)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: .all)
         .ignoresSafeArea(.keyboard, edges: .all)
         .disableKeyboardLayoutShift(keyboardOverlap: $keyboardOverlap)
         .statusBarHidden(true)
+        .alert("Remote computer login password", isPresented: $showLockPasswordPrompt) {
+            SecureField("Computer account password", text: $lockPassword)
+                // Avoid iCloud Keychain autofilling the Portico/RustDesk *connection* password.
+                .textContentType(.oneTimeCode)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+            Button("Cancel", role: .cancel) {
+                lockPassword = ""
+                // Only restore keyboard if we are not mid-unlock.
+                if !session.isSubmittingOsPassword {
+                    restorePortraitKeyboard()
+                }
+            }
+            Button("Unlock once") {
+                unlockOnceWithoutSaving()
+            }
+            .disabled(lockPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Save & Unlock") {
+                saveLockPasswordAndUnlock()
+            }
+            .disabled(lockPassword.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        } message: {
+            Text(
+                "Enter the Windows/macOS user-account password for this computer (what you type at its lock screen)—not the Portico connection password. Prefer typing it manually; do not accept iCloud autofill."
+            )
+        }
         .onAppear {
             // Phone: rail visible, advanced tools in ⋯ panel.
             if isCompact || isShortHeight {
@@ -125,6 +121,303 @@ struct RemoteSessionView: View {
         .onDisappear {
             session.softKeyboardVisible = false
             showToolsPanel = false
+        }
+    }
+
+    private func portraitLayout(bottomInset: CGFloat, topInset: CGFloat) -> some View {
+        ZStack {
+            remoteCanvas(isPortrait: true, showsRailReveal: false)
+            portraitTopBar(topInset: topInset)
+                .frame(maxHeight: .infinity, alignment: .top)
+                .opacity(showToolsPanel ? 0 : 1)
+                .allowsHitTesting(!showToolsPanel)
+            portraitControlBar(
+                bottomInset: keyboardOverlap > 0 ? 8 : max(bottomInset, 8)
+            )
+            .frame(maxHeight: .infinity, alignment: .bottom)
+            .opacity(showToolsPanel ? 0 : 1)
+            .allowsHitTesting(!showToolsPanel)
+        }
+        .padding(.bottom, keyboardOverlap)
+    }
+
+    private func remoteCanvas(isPortrait: Bool, showsRailReveal: Bool) -> some View {
+        ZStack {
+            MetalRemoteView(
+                session: session,
+                onSize: { size in
+                    let scale = UIScreen.main.scale
+                    session.setViewSize(
+                        width: Int(size.width * scale),
+                        height: Int(size.height * scale)
+                    )
+                }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .ignoresSafeArea(.keyboard)
+
+            VStack(spacing: 0) {
+                if session.showQualityHUD {
+                    if isCompact || isPortrait {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            hudPill
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                        .allowsHitTesting(false)
+                    } else {
+                        topChromeIPad
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .animation(.easeOut(duration: 0.15), value: session.showQualityHUD)
+
+            if showsRailReveal, railHidden {
+                railRevealTab
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+
+            if showToolsPanel {
+                toolsPanelOverlay
+            }
+
+            if case .needPassword = session.phase {
+                passwordSheet
+            }
+            if case .failed(let message) = session.phase {
+                failureOverlay(message)
+            }
+            if session.phase == .connecting {
+                connectingOverlay
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .ignoresSafeArea(.keyboard)
+    }
+
+    private func showKeyboardWhenReady(isPortrait: Bool, phase: SessionPhase) {
+        if isPortrait, phase == .connected {
+            session.softKeyboardVisible = true
+        }
+    }
+
+    // MARK: - Portrait controls
+
+    private func portraitTopBar(topInset: CGFloat) -> some View {
+        HStack(spacing: 12) {
+            portraitKeyButton(title: "esc", label: "Escape") {
+                session.sendEscape()
+            }
+            .disabled(session.phase != .connected || session.viewOnly)
+
+            Spacer(minLength: 0)
+
+            if !lockStatusMessage.isEmpty {
+                Text(lockStatusMessage)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.white.opacity(0.82))
+                    .lineLimit(1)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.ultraThinMaterial, in: Capsule())
+            }
+
+            Spacer(minLength: 0)
+
+            portraitKeyButton(
+                systemName: isAuthenticatingUnlock ? "ellipsis" : "power",
+                label: remoteScreenLocked ? "Unlock remote screen" : "Lock remote screen",
+                emphasized: remoteScreenLocked
+            ) {
+                handleRemotePowerButton()
+            }
+            .disabled(
+                session.phase != .connected
+                    || session.viewOnly
+                    || isAuthenticatingUnlock
+            )
+            .contextMenu {
+                Button("Unlock with computer login password") {
+                    remoteScreenLocked = true
+                    unlockUsingSavedPassword()
+                }
+                Button("Replace computer login password") {
+                    replaceLockPassword()
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        // Use the notch/status safe-area height for essential controls instead
+        // of reserving another full control row beneath it.
+        .frame(height: max(topInset, 52), alignment: .bottom)
+        .accessibilityLabel("Connected to \(session.peerId)")
+    }
+
+    private func portraitControlBar(bottomInset: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            disconnectControl
+            inputControlButtons
+            moreToolsControl
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.white.opacity(0.12), lineWidth: 1))
+        .padding(.horizontal, 8)
+        .padding(.bottom, bottomInset)
+        .frame(maxWidth: .infinity, alignment: .center)
+        .shadow(color: .black.opacity(0.42), radius: 12, y: 5)
+    }
+
+    private func portraitKeyButton(
+        title: String? = nil,
+        systemName: String? = nil,
+        label: String,
+        emphasized: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Group {
+                if let systemName {
+                    Image(systemName: systemName)
+                        .font(.system(size: 17, weight: .bold))
+                } else {
+                    Text(title ?? "")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                }
+            }
+            .foregroundStyle(emphasized ? Color.black : Color.white)
+            .frame(width: 44, height: 40)
+            .background(
+                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    .fill(emphasized ? Color.white : Color.black.opacity(0.62))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11, style: .continuous)
+                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    private func handleRemotePowerButton() {
+        if remoteScreenLocked {
+            unlockUsingSavedPassword()
+        } else {
+            session.lockRemoteScreen()
+            remoteScreenLocked = true
+            lockStatusMessage = "Remote screen locked"
+        }
+    }
+
+    private func unlockUsingSavedPassword() {
+        guard !isAuthenticatingUnlock else { return }
+        isAuthenticatingUnlock = true
+        lockStatusMessage = "Authenticating…"
+        lockCredentialStore.retrieve(
+            for: session.peerId,
+            reason: "Use the saved computer login password for \(session.peerId)"
+        ) { result in
+            switch result {
+            case .success(let savedPassword):
+                submitRemoteUnlock(password: savedPassword)
+            case .failure(let error):
+                isAuthenticatingUnlock = false
+                if let credentialError = error as? RemoteLockCredentialError,
+                   case .notFound = credentialError {
+                    lockStatusMessage = "Enter computer login password"
+                    presentLockPasswordPrompt()
+                } else {
+                    lockStatusMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func saveLockPasswordAndUnlock() {
+        let enteredPassword = lockPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        lockPassword = ""
+        guard !enteredPassword.isEmpty else { return }
+
+        isAuthenticatingUnlock = true
+        lockStatusMessage = "Authenticating…"
+        // Keep soft keyboard down so SecureField text cannot re-inject into the peer.
+        session.softKeyboardVisible = false
+        lockCredentialStore.authenticate(
+            reason: "Protect the computer login password for \(session.peerId)"
+        ) {
+            result in
+            switch result {
+            case .success(let context):
+                do {
+                    try lockCredentialStore.save(
+                        password: enteredPassword,
+                        for: session.peerId,
+                        context: context
+                    )
+                    submitRemoteUnlock(password: enteredPassword)
+                } catch {
+                    isAuthenticatingUnlock = false
+                    lockStatusMessage = error.localizedDescription
+                }
+            case .failure(let error):
+                isAuthenticatingUnlock = false
+                lockStatusMessage = error.localizedDescription
+            }
+        }
+    }
+
+    /// Type the password once without writing Keychain — useful when debugging a rejected unlock.
+    private func unlockOnceWithoutSaving() {
+        let enteredPassword = lockPassword.trimmingCharacters(in: .whitespacesAndNewlines)
+        lockPassword = ""
+        guard !enteredPassword.isEmpty else { return }
+        session.softKeyboardVisible = false
+        submitRemoteUnlock(password: enteredPassword)
+    }
+
+    private func submitRemoteUnlock(password: String) {
+        // Soft keyboard stays off for the full OS-password sequence (see SessionController).
+        session.softKeyboardVisible = false
+        session.unlockRemoteScreen(using: password)
+        isAuthenticatingUnlock = false
+        // Stay in locked mode so a wrong password can be retried via the power button
+        // without an extra lock. If still locked after the attempt, long-press → Unlock.
+        lockStatusMessage = "Unlocking…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            remoteScreenLocked = false
+            if lockStatusMessage == "Unlocking…" {
+                lockStatusMessage = "Unlock submitted — tap power again if still locked"
+            }
+            // Restore soft keyboard only after unlock keystrokes are fully done.
+            if !session.isSubmittingOsPassword {
+                restorePortraitKeyboard()
+            }
+        }
+    }
+
+    private func replaceLockPassword() {
+        lockCredentialStore.remove(for: session.peerId)
+        lockPassword = ""
+        lockStatusMessage = "Enter new computer login password"
+        presentLockPasswordPrompt()
+    }
+
+    private func presentLockPasswordPrompt() {
+        // Release the pass-through keyboard window so the alert's SecureField can focus.
+        session.softKeyboardVisible = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+            showLockPasswordPrompt = true
+        }
+    }
+
+    private func restorePortraitKeyboard() {
+        if session.phase == .connected {
+            session.softKeyboardVisible = true
         }
     }
 
@@ -164,10 +457,7 @@ struct RemoteSessionView: View {
 
     private func sidecarSidebar(bottomInset: CGFloat, topInset: CGFloat) -> some View {
         VStack(spacing: 0) {
-            sidebarIconButton(systemName: "xmark", label: "Disconnect") {
-                session.close()
-                isPresented = false
-            }
+            disconnectControl
             .padding(.top, topInset)
             .padding(.bottom, 6)
 
@@ -176,79 +466,17 @@ struct RemoteSessionView: View {
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 6) {
-                    sidebarIconButton(
-                        systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
-                        label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
-                        emphasized: true
-                    ) {
-                        session.toggleRemoteCursor()
-                    }
-
-                    sidebarIconButton(
-                        systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
-                        label: "Keyboard"
-                    ) {
-                        // Soft keyboard uses UIKeyInput; HW shortcut capture pauses while it's up
-                        // but we no longer clear the preference permanently.
-                        session.softKeyboardVisible.toggle()
-                    }
-
-                    Button {
-                        session.pasteFromClipboard()
-                    } label: {
-                        Image(systemName: "doc.on.clipboard")
-                            .font(.system(size: 17, weight: .semibold))
-                            .foregroundStyle(Color.white.opacity(0.92))
-                            .frame(width: 40, height: 40)
-                            .background(Circle().fill(Color.white.opacity(0.08)))
-                    }
-                    .buttonStyle(.plain)
-                    .simultaneousGesture(
-                        LongPressGesture(minimumDuration: 0.45).onEnded { _ in
-                            session.typeClipboardAsKeystrokes()
-                        }
-                    )
-                    .accessibilityLabel("Paste clipboard to peer")
-                    .help("Tap: push clipboard · Long-press: type keystrokes")
-
-                    if session.hasMultipleDisplays {
-                        sidebarIconButton(
-                            systemName: "rectangle.on.rectangle",
-                            label: "Display \(session.displaySummary)",
-                            emphasized: true
-                        ) {
-                            session.cycleDisplay()
-                        }
-                    }
+                    inputControlButtons
 
                     Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
-                    modButton("⌃", active: session.modControl, label: "Control") {
-                        session.toggleControl()
-                    }
-                    modButton("⌥", active: session.modOption, label: "Option") {
-                        session.toggleOption()
-                    }
-                    modButton("⇧", active: session.modShift, label: "Shift") {
-                        session.toggleShift()
-                    }
-                    modButton("⌘", active: session.modCommand, label: "Command") {
-                        session.toggleCommand()
-                    }
+                    modifierControlButtons
 
                     Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
 
                     if isCompact {
-                        // ⋯ opens tappable panel (Menu is dead under overFullScreen).
-                        sidebarIconButton(
-                            systemName: showToolsPanel ? "ellipsis.circle.fill" : "ellipsis.circle",
-                            label: "More tools",
-                            emphasized: showToolsPanel
-                        ) {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                showToolsPanel.toggle()
-                            }
-                        }
+                        // ⋯ opens a directly tappable panel inside the modal host.
+                        moreToolsControl
                     } else if sidebarExpanded {
                         advancedToolButtons
                     }
@@ -289,10 +517,90 @@ struct RemoteSessionView: View {
         }
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity, alignment: .top)
-        .overlay(alignment: .trailing) {
-            Rectangle()
-                .fill(Color.white.opacity(0.08))
-                .frame(width: 1)
+    }
+
+    private var disconnectControl: some View {
+        sidebarIconButton(systemName: "xmark", label: "Disconnect") {
+            session.close()
+            isPresented = false
+        }
+    }
+
+    @ViewBuilder
+    private var inputControlButtons: some View {
+        sidebarIconButton(
+            systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
+            label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
+            emphasized: true
+        ) {
+            session.toggleRemoteCursor()
+        }
+
+        sidebarIconButton(
+            systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
+            label: "Keyboard"
+        ) {
+            session.softKeyboardVisible.toggle()
+        }
+
+        clipboardControl
+
+        if session.hasMultipleDisplays {
+            sidebarIconButton(
+                systemName: "rectangle.on.rectangle",
+                label: "Display \(session.displaySummary)",
+                emphasized: true
+            ) {
+                session.cycleDisplay()
+            }
+        }
+    }
+
+    private var clipboardControl: some View {
+        Button {
+            session.pasteFromClipboard()
+        } label: {
+            Image(systemName: "doc.on.clipboard")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Color.white.opacity(0.08)))
+        }
+        .buttonStyle(.plain)
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in
+                session.typeClipboardAsKeystrokes()
+            }
+        )
+        .accessibilityLabel("Paste clipboard to peer")
+        .help("Tap: push clipboard · Long-press: type keystrokes")
+    }
+
+    @ViewBuilder
+    private var modifierControlButtons: some View {
+        modButton("⌃", active: session.modControl, label: "Control") {
+            session.toggleControl()
+        }
+        modButton("⌥", active: session.modOption, label: "Option") {
+            session.toggleOption()
+        }
+        modButton("⇧", active: session.modShift, label: "Shift") {
+            session.toggleShift()
+        }
+        modButton("⌘", active: session.modCommand, label: "Command") {
+            session.toggleCommand()
+        }
+    }
+
+    private var moreToolsControl: some View {
+        sidebarIconButton(
+            systemName: showToolsPanel ? "ellipsis.circle.fill" : "ellipsis.circle",
+            label: "More tools",
+            emphasized: showToolsPanel
+        ) {
+            withAnimation(.easeOut(duration: 0.15)) {
+                showToolsPanel.toggle()
+            }
         }
     }
 
@@ -322,7 +630,7 @@ struct RemoteSessionView: View {
             emphasized: session.showQualityHUD
         ) {
             withAnimation(.easeOut(duration: 0.15)) {
-                session.showQualityHUD.toggle()
+                session.toggleQualityHUD()
             }
         }
     }
@@ -337,6 +645,19 @@ struct RemoteSessionView: View {
                 }
 
             VStack(alignment: .leading, spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Keyboard modifiers")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.white.opacity(0.6))
+                    HStack(spacing: 8) {
+                        modifierControlButtons
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+
+                Divider().overlay(Color.white.opacity(0.12))
+
                 toolsPanelRow(
                     systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
                     title: session.viewOnly ? "View only" : "Control mode"
@@ -360,7 +681,7 @@ struct RemoteSessionView: View {
                     title: session.showQualityHUD ? "Hide status HUD" : "Show status HUD"
                 ) {
                     withAnimation(.easeOut(duration: 0.15)) {
-                        session.showQualityHUD.toggle()
+                        session.toggleQualityHUD()
                     }
                 }
                 if session.hasMultipleDisplays {

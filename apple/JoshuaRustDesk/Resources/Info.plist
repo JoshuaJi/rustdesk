@@ -24,11 +24,15 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIViewControllerBasedStatusBarAppearance</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
 	<!-- Pure Swift client replaces Flutter Runner under the same bundle id. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Portico uses the local network to find and connect to nearby devices.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Portico uses Face ID to unlock saved remote-screen passwords.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_rustdesk._tcp</string>

@@ -38,6 +38,10 @@ void rd_session_switch_display(const char *session_uuid, int display);
 
 void rd_session_send_mouse(const char *session_uuid, const char *json);
 void rd_session_input_string(const char *session_uuid, const char *value);
+/// Ask the peer to lock its current desktop session.
+void rd_session_lock_screen(const char *session_uuid);
+/// Wake the remote login surface and submit the OS account password (not the connection password).
+void rd_session_input_os_password(const char *session_uuid, const char *password);
 /// Push text into the peer OS clipboard (not keystroke injection).
 void rd_session_send_clipboard(const char *session_uuid, const char *text);
 void rd_session_input_key(const char *session_uuid, const char *name, int down, int press, int alt,

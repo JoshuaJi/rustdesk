@@ -25,6 +25,8 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
     final class FixerView: UIView {
         var onKeyboardOverlapChange: ((CGFloat) -> Void)?
         private var observers: [NSObjectProtocol] = []
+        private var lastKeyboardFrame: CGRect?
+        private var reportedKeyboardOverlap: CGFloat = 0
 
         override init(frame: CGRect) {
             super.init(frame: frame)
@@ -51,8 +53,19 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
             applyAll()
             installObservers()
             DispatchQueue.main.async { [weak self] in
+                self?.updateKeyboardOverlap()
                 self?.applyAll()
             }
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            updateKeyboardOverlap()
+        }
+
+        override func safeAreaInsetsDidChange() {
+            super.safeAreaInsetsDidChange()
+            updateKeyboardOverlap()
         }
 
         private func installObservers() {
@@ -63,6 +76,8 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
                 UIResponder.keyboardDidShowNotification,
                 UIResponder.keyboardWillHideNotification,
                 UIResponder.keyboardDidHideNotification,
+                UIDevice.orientationDidChangeNotification,
+                UIWindow.didBecomeKeyNotification,
             ]
             for name in names {
                 observers.append(nc.addObserver(
@@ -72,6 +87,10 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
                 ) { [weak self] notification in
                     self?.updateKeyboardOverlap(from: notification)
                     self?.applyAll()
+                    DispatchQueue.main.async {
+                        self?.updateKeyboardOverlap()
+                        self?.applyAll()
+                    }
                 })
             }
         }
@@ -150,25 +169,41 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
             CATransaction.commit()
         }
 
-        private func updateKeyboardOverlap(from notification: Notification) {
+        private func updateKeyboardOverlap(from notification: Notification? = nil) {
             guard let window else {
-                onKeyboardOverlapChange?(0)
+                if reportedKeyboardOverlap != 0 {
+                    reportedKeyboardOverlap = 0
+                    onKeyboardOverlapChange?(0)
+                }
                 return
             }
-            if notification.name == UIResponder.keyboardDidHideNotification {
-                onKeyboardOverlapChange?(0)
-                return
+            if notification?.name == UIResponder.keyboardDidHideNotification {
+                lastKeyboardFrame = nil
+            } else if let value = notification?.userInfo?[UIResponder.keyboardFrameEndUserInfoKey]
+                as? NSValue {
+                lastKeyboardFrame = value.cgRectValue
             }
-            guard
-                let value = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue
-            else {
-                return
+
+            var overlap: CGFloat = 0
+            if lastKeyboardFrame != nil, let hostView = findNearestViewController()?.view {
+                let frame = hostView.keyboardLayoutGuide.layoutFrame
+                let intersection = hostView.bounds.intersection(frame)
+                let touchesBottom = frame.maxY >= hostView.bounds.maxY - 1
+                if touchesBottom, !intersection.isNull {
+                    overlap = intersection.height
+                }
             }
-            let frame = window.convert(value.cgRectValue, from: nil)
-            let intersection = window.bounds.intersection(frame)
-            let touchesBottom = frame.maxY >= window.bounds.maxY - 1
-            let overlap = touchesBottom && !intersection.isNull ? intersection.height : 0
-            onKeyboardOverlapChange?(max(0, overlap))
+            if overlap <= 0, let lastKeyboardFrame {
+                let frame = window.convert(lastKeyboardFrame, from: nil)
+                let intersection = window.bounds.intersection(frame)
+                let touchesBottom = frame.maxY >= window.bounds.maxY - 1
+                overlap = touchesBottom && !intersection.isNull ? intersection.height : 0
+            }
+            let nextOverlap = max(0, overlap)
+            if abs(nextOverlap - reportedKeyboardOverlap) > 0.5 {
+                reportedKeyboardOverlap = nextOverlap
+                onKeyboardOverlapChange?(nextOverlap)
+            }
         }
 
         private func findNearestViewController() -> UIViewController? {

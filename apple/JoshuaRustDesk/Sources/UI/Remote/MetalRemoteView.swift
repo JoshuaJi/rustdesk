@@ -12,8 +12,8 @@ struct MetalRemoteView: UIViewRepresentable {
         Coordinator(session: session)
     }
 
-    /// Matches SwiftUI card radius; CAMetalLayer ignores clipShape without this.
-    static let cornerRadius: CGFloat = 14
+    /// The remote surface is full-bleed; the physical display supplies edge clipping.
+    static let cornerRadius: CGFloat = 0
 
     func makeUIView(context: Context) -> TouchMetalView {
         let v = TouchMetalView(frame: .zero, device: MTLCreateSystemDefaultDevice())
@@ -113,7 +113,12 @@ struct MetalRemoteView: UIViewRepresentable {
             pipeline = try? device.makeRenderPipelineState(descriptor: desc)
         }
 
-        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+        func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+            if let touchView = view as? TouchMetalView {
+                touchView.resetViewport()
+            }
+            session.setViewSize(width: Int(size.width), height: Int(size.height))
+        }
 
         func draw(in view: MTKView) {
             // Zero-copy path: upload BGRA straight from Rust buffer (no intermediate Data).

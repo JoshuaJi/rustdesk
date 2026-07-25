@@ -44,6 +44,8 @@ final class SessionController: ObservableObject {
     @Published var currentDisplayIndex: Int = 0
     /// Soft-keyboard toggle (bound by toolbar / Metal view).
     @Published var softKeyboardVisible: Bool = false
+    /// True while OS-login unlock is in flight — soft keyboard must not inject keys.
+    @Published private(set) var isSubmittingOsPassword: Bool = false
     /// Always capture HW system shortcuts (⌘C etc.) when possible — no UI toggle.
     let captureSystemShortcuts: Bool = true
     /// Simple quality label for toolbar.
@@ -76,7 +78,8 @@ final class SessionController: ObservableObject {
     @Published var qualityFPS = ""
     @Published var qualityDelay = ""
     @Published var qualityCodec = ""
-    @Published var showQualityHUD = true
+    @Published var showQualityHUD: Bool =
+        UserDefaults.standard.object(forKey: "show_quality_hud") as? Bool ?? true
     @Published var lastClipboardNote = ""
     /// Preferred codec for host negotiate: auto / h264 / h265.
     @Published var codecPreference: String = UserDefaults.standard.string(forKey: "codec_preference") ?? "h264"
@@ -137,6 +140,8 @@ final class SessionController: ObservableObject {
         audioMuted = true
         didEnsureControlMode = false
         didEnsureAudio = false
+        lastViewW = 0
+        lastViewH = 0
         lastRequestedResW = 0
         lastRequestedResH = 0
         resolutionWork?.cancel()
@@ -375,6 +380,7 @@ final class SessionController: ObservableObject {
 
     func setViewSize(width: Int, height: Int) {
         guard active, width > 0, height > 0 else { return }
+        guard width != lastViewW || height != lastViewH else { return }
         let display = max(0, currentDisplayIndex)
         // Soft-renderer client viewport (for letterbox math / encoder hints).
         rd_session_set_size(sessionUUID, display, width, height)
@@ -463,13 +469,13 @@ final class SessionController: ObservableObject {
 
     /// Physical key via USB HID usage (map mode).
     func handleKey(character: String, usbHid: Int, down: Bool, lockModes: Int = 0) {
-        guard active, !viewOnly, usbHid != 0 else { return }
+        guard active, !viewOnly, usbHid != 0, !shouldBlockKeyboardInput else { return }
         rd_session_handle_key(sessionUUID, character, Int32(usbHid), Int32(lockModes), down ? 1 : 0)
     }
 
     /// Soft-keyboard / paste text path.
     func inputString(_ value: String) {
-        guard active, !viewOnly, !value.isEmpty else { return }
+        guard active, !viewOnly, !value.isEmpty, !shouldBlockKeyboardInput else { return }
         rd_session_input_string(sessionUUID, value)
     }
 
@@ -494,6 +500,61 @@ final class SessionController: ObservableObject {
             shift ? 1 : 0,
             command ? 1 : 0
         )
+    }
+
+    /// Send a complete USB-HID key press to the peer.
+    func pressKey(character: String = "", usbHid: Int) {
+        handleKey(character: character, usbHid: usbHid, down: true)
+        handleKey(character: character, usbHid: usbHid, down: false)
+    }
+
+    func sendEscape() {
+        pressKey(usbHid: 0x29)
+    }
+
+    /// Use RustDesk's native lock-screen command instead of synthesizing a shortcut.
+    func lockRemoteScreen() {
+        guard active, !viewOnly else { return }
+        rd_session_lock_screen(sessionUUID)
+        statusText = "Remote screen locked"
+    }
+
+    /// Wake the remote login surface and submit the OS account password.
+    /// Uses RustDesk's `input_os_password` path (mouse-activate login field → legacy sequence → Return),
+    /// not map-mode keystroke injection, which fails on most lock screens.
+    ///
+    /// Critical: soft keyboard must stay down for the whole sequence. Re-showing it right after
+    /// the SecureField alert dismisses can re-deliver the typed password into the remote field
+    /// (double-type → lock screen rejects a correct password).
+    func unlockRemoteScreen(using password: String) {
+        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard active, !viewOnly, !trimmed.isEmpty else { return }
+
+        clearModifiers(sendKeyUp: true)
+        softKeyboardVisible = false
+        isSubmittingOsPassword = true
+        statusText = "Unlocking…"
+
+        // Let soft keyboard fully resign before the peer receives activate/type events.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self else { return }
+            guard self.active else {
+                self.isSubmittingOsPassword = false
+                return
+            }
+            rd_session_input_os_password(self.sessionUUID, trimmed)
+            // activate ~1.5s + clear + type + Return; keep soft keyboard muted for the full window.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.8) { [weak self] in
+                guard let self else { return }
+                self.isSubmittingOsPassword = false
+                self.statusText = "Unlock submitted"
+            }
+        }
+    }
+
+    /// Soft-keyboard / hardware inserts must not race with OS unlock.
+    var shouldBlockKeyboardInput: Bool {
+        isSubmittingOsPassword
     }
 
     /// Push iOS pasteboard text into the peer's OS clipboard (true sync).
@@ -785,6 +846,11 @@ final class SessionController: ObservableObject {
         let idx = order.firstIndex(of: codecPreference) ?? 0
         codecPreference = order[(idx + 1) % order.count]
         applyCodecPreference()
+    }
+
+    func toggleQualityHUD() {
+        showQualityHUD.toggle()
+        UserDefaults.standard.set(showQualityHUD, forKey: "show_quality_hud")
     }
 
     /// True when quality status reports a hard-decodable format.

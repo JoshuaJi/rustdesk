@@ -36,7 +36,7 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
         // Above session UI for key status; system keyboard window is much higher.
         w.windowLevel = .normal + 1
         w.isHidden = true
-        let vc = UIViewController()
+        let vc = StatusBarHiddenViewController()
         vc.view.backgroundColor = .clear
         w.rootViewController = vc
         return w
@@ -127,6 +127,7 @@ final class SoftKeyboardHost: NSObject, UITextFieldDelegate {
 
         // Critical: this window stays KEY while the soft keyboard is up.
         keyboardWindow.makeKeyAndVisible()
+        keyboardWindow.rootViewController?.setNeedsStatusBarAppearanceUpdate()
 
         // Hard FR cycle — required for second+ shows after resign.
         if field.isFirstResponder {
@@ -278,4 +279,10 @@ private final class PassThroughWindow: UIWindow {
         // The system keyboard uses a separate window and is unaffected.
         nil
     }
+}
+
+/// The keyboard's pass-through window becomes key, so its root must preserve
+/// the remote session's hidden status-bar policy while typing.
+private final class StatusBarHiddenViewController: UIViewController {
+    override var prefersStatusBarHidden: Bool { true }
 }
