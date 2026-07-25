@@ -66,12 +66,15 @@ final class RemoteGestureEngine {
 
     struct Config {
         var dragSlop: CGFloat = 12
-        var longPress: CFTimeInterval = 0.45
-        var doubleTapInterval: CFTimeInterval = 0.32
-        var doubleTapDistance: CGFloat = 36
-        var twoFingerTapTravel: CGFloat = 24
-        var twoFingerTapDuration: CFTimeInterval = 0.42
-        var twoFingerDoubleInterval: CFTimeInterval = 0.32
+        /// Looser than dragSlop so a steady hold still counts as long-press.
+        var longPressSlop: CGFloat = 20
+        var longPress: CFTimeInterval = 0.42
+        var doubleTapInterval: CFTimeInterval = 0.30
+        var doubleTapDistance: CGFloat = 40
+        /// Centroid-only budget for two-finger tap (per-finger jitter ignored).
+        var twoFingerTapTravel: CGFloat = 28
+        var twoFingerTapDuration: CFTimeInterval = 0.40
+        var twoFingerDoubleInterval: CFTimeInterval = 0.28
         /// Span must change by this fraction to commit (or upgrade) to pinch.
         /// Higher = prefer two-finger pan/scroll over accidental pinch.
         var pinchCommitRatio: CGFloat = 0.09
@@ -114,7 +117,10 @@ final class RemoteGestureEngine {
         var startPoints: [ObjectIdentifier: CGPoint]
         var lastCentroid: CGPoint
         var lastSpan: CGFloat
+        /// Max of per-finger or centroid travel (scroll commit sensitivity).
         var maxTravel: CGFloat
+        /// Centroid-only travel — used for two-finger *tap* (right-click) detection.
+        var maxCentroidTravel: CGFloat
         var baseZoom: CGFloat
         var commit: MultiCommit?
         var wheelAccY: CGFloat
@@ -296,6 +302,13 @@ final class RemoteGestureEngine {
         guard let (id, p) = active.first else { return }
         epochMode = preferredMode
         let now = CACurrentMediaTime()
+        // Second tap of a double-tap: cancel the delayed single-click immediately.
+        if let last = lastOneTap,
+           now - last.t < config.doubleTapInterval,
+           hypot(p.x - last.p.x, p.y - last.p.y) < config.doubleTapDistance {
+            oneFingerTapWork?.cancel()
+            oneFingerTapWork = nil
+        }
         let o = OneFinger(
             id: id,
             start: p,
@@ -371,9 +384,11 @@ final class RemoteGestureEngine {
     private func fireLongPress() {
         longPressWork = nil
         guard case .one(var o) = state, !o.dragging, !o.longPressFired else { return }
-        guard o.maxTravel <= config.dragSlop else { return }
+        // Hold still enough — slightly looser than drag slop so a steady press works.
+        guard o.maxTravel <= config.longPressSlop else { return }
         o.longPressFired = true
         state = .one(o)
+        // Tap-and-hold → right-click (remote context menu).
         switch epochMode {
         case .touch:
             emit(.rightClick(point: o.start))
@@ -381,6 +396,7 @@ final class RemoteGestureEngine {
             emit(.rightClickAtCursor)
         }
         emit(.haptic(.medium))
+        // Swallow residual motion until all fingers up.
         state = .done
     }
 
@@ -410,6 +426,7 @@ final class RemoteGestureEngine {
             lastCentroid: c,
             lastSpan: max(s, 1),
             maxTravel: 0,
+            maxCentroidTravel: 0,
             baseZoom: delegate?.gestureEngineZoom ?? 1,
             commit: nil,
             wheelAccY: 0,
@@ -423,9 +440,10 @@ final class RemoteGestureEngine {
         guard pts.count >= 2 else { return }
         let c = centroid(pts)
         let s = span(pts)
-        let travel = hypot(c.x - m.startCentroid.x, c.y - m.startCentroid.y)
-        m.maxTravel = max(m.maxTravel, travel)
-        // Per-finger travel.
+        let centroidTravel = hypot(c.x - m.startCentroid.x, c.y - m.startCentroid.y)
+        m.maxCentroidTravel = max(m.maxCentroidTravel, centroidTravel)
+        m.maxTravel = max(m.maxTravel, centroidTravel)
+        // Per-finger travel (helps catch early scroll intent).
         for (id, p) in active {
             if let sp = m.startPoints[id] {
                 m.maxTravel = max(m.maxTravel, hypot(p.x - sp.x, p.y - sp.y))
@@ -458,8 +476,9 @@ final class RemoteGestureEngine {
                 m.commit = .pinch
                 twoFingerTapWork?.cancel()
             }
-        } else if m.commit == nil, m.maxTravel >= config.multiCommitTravel {
+        } else if m.commit == nil, m.maxCentroidTravel >= config.multiCommitTravel {
             // Always remote mouse-wheel — not viewport pan — when two fingers translate.
+            // Use centroid travel so finger-local jitter doesn't kill a right-click tap.
             m.commit = .scroll
             twoFingerTapWork?.cancel()
         }
@@ -506,10 +525,10 @@ final class RemoteGestureEngine {
         }
 
         let duration = CACurrentMediaTime() - m.t0
-        let isTap = m.maxTravel <= config.twoFingerTapTravel
-            && duration > 0.03
+        // Centroid-only: each finger can jitter without aborting a two-finger right-click.
+        let isTap = m.maxCentroidTravel <= config.twoFingerTapTravel
+            && duration > 0.02
             && duration <= config.twoFingerTapDuration
-            && active.count + 0 <= 2 // peak was 2 conceptually
 
         guard isTap else {
             state = .idle

@@ -320,9 +320,15 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
         case .leftUp(let p):
             sendMouse(type: "up", point: p, buttons: "left")
         case .leftClick(let p, let count):
-            for _ in 0..<max(1, count) {
-                sendMouse(type: "down", point: p, buttons: "left")
-                sendMouse(type: "up", point: p, buttons: "left")
+            // Double-click: two full down/up pairs with a short gap so Windows/macOS
+            // register it as a double-click rather than one messy chord.
+            sendMouse(type: "down", point: p, buttons: "left")
+            sendMouse(type: "up", point: p, buttons: "left")
+            if count >= 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.sendMouse(type: "down", point: p, buttons: "left")
+                    self?.sendMouse(type: "up", point: p, buttons: "left")
+                }
             }
         case .rightClick(let p):
             sendMouse(type: "move", point: p, buttons: "")
@@ -339,8 +345,11 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
             // Keep pointer in the phone viewport while zoomed (trackpad-style).
             ensureCursorOnScreen()
         case .leftClickAtCursor(let count):
-            for _ in 0..<max(1, count) {
-                session?.clickAtCursor(button: "left")
+            session?.clickAtCursor(button: "left")
+            if count >= 2 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    self?.session?.clickAtCursor(button: "left")
+                }
             }
         case .rightClickAtCursor:
             session?.clickAtCursor(button: "right")
