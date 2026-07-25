@@ -1,18 +1,13 @@
 import SwiftUI
 
-/// Sidecar-inspired remote session: docked rail + canvas.
-/// Adapts for iPhone (compact): scrollable rail, compact HUD, safe-area padding.
+/// Remote session chrome: top esc/power strip + bottom capsule control bar.
+/// Same layout in portrait and landscape (floating overlays over the canvas).
 struct RemoteSessionView: View {
     @ObservedObject var session: SessionController
     @Binding var isPresented: Bool
     @Environment(\.horizontalSizeClass) private var hSize
-    @Environment(\.verticalSizeClass) private var vSize
     @State private var password = ""
-    /// Advanced tools visible in the rail (quality/codec/HUD…).
-    @State private var sidebarExpanded = true
-    /// Fully hide the rail on compact (edge tab restores it).
-    @State private var railHidden = false
-    /// When true, portrait/side control bar shows tools (chevron on left);
+    /// When true, control bar shows tools (chevron on left);
     /// when false, shows keys: tab + modifiers (chevron on right).
     @State private var controlBarShowsTools = false
     /// Bottom-anchored system keyboard overlap reported by the UIKit layout bridge.
@@ -27,55 +22,19 @@ struct RemoteSessionView: View {
     private let lockCredentialStore = RemoteLockCredentialStore.shared
 
     private var isCompact: Bool { hSize == .compact }
-    /// Phone landscape: short height — keep advanced tools collapsed.
-    private var isShortHeight: Bool { vSize == .compact }
-
-    /// Same rail width as iPad — one clean column of 40pt controls.
-    private var sidebarWidth: CGFloat {
-        if railHidden { return 0 }
-        return 56
-    }
 
     var body: some View {
         GeometryReader { geo in
             let bottomSafe = geo.safeAreaInsets.bottom
             let topSafe = geo.safeAreaInsets.top
-            let isPortrait = geo.size.height >= geo.size.width
 
-            Group {
-                if isPortrait {
-                    portraitLayout(bottomInset: bottomSafe, topInset: topSafe)
-                } else {
-                    ZStack(alignment: .leading) {
-                        remoteCanvas(
-                            isPortrait: false,
-                            showsRailReveal: true,
-                            topSafe: topSafe
-                        )
-                            .padding(.bottom, keyboardOverlap)
-
-                        if !railHidden {
-                            sidecarSidebar(
-                                bottomInset: max(bottomSafe, 10),
-                                // Keep rail below Dynamic Island / status region on phones.
-                                topInset: max(topSafe, isCompact ? 12 : 8)
-                            )
-                            .frame(width: sidebarWidth)
-                            .frame(maxHeight: .infinity)
-                            .padding(.bottom, keyboardOverlap)
-                        }
-                    }
+            sessionChrome(bottomInset: bottomSafe, topInset: topSafe)
+                .onAppear {
+                    showKeyboardWhenReady(phase: session.phase)
                 }
-            }
-            .onAppear {
-                showKeyboardWhenReady(isPortrait: isPortrait, phase: session.phase)
-            }
-            .onChange(of: isPortrait) { portrait in
-                showKeyboardWhenReady(isPortrait: portrait, phase: session.phase)
-            }
-            .onChange(of: session.phase) { phase in
-                showKeyboardWhenReady(isPortrait: isPortrait, phase: phase)
-            }
+                .onChange(of: session.phase) { phase in
+                    showKeyboardWhenReady(phase: phase)
+                }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
@@ -93,7 +52,7 @@ struct RemoteSessionView: View {
                 lockPassword = ""
                 // Only restore keyboard if we are not mid-unlock.
                 if !session.isSubmittingOsPassword {
-                    restorePortraitKeyboard()
+                    restoreSoftKeyboard()
                 }
             }
             Button("Unlock once") {
@@ -110,12 +69,7 @@ struct RemoteSessionView: View {
             )
         }
         .onAppear {
-            // Phone: rail visible, advanced tools in ⋯ panel.
-            if isCompact || isShortHeight {
-                sidebarExpanded = false
-                railHidden = false
-                controlBarShowsTools = false
-            }
+            controlBarShowsTools = false
         }
         .onChange(of: session.softKeyboardVisible) { visible in
             if visible {
@@ -133,12 +87,12 @@ struct RemoteSessionView: View {
         }
     }
 
-    private func portraitLayout(bottomInset: CGFloat, topInset: CGFloat) -> some View {
+    private func sessionChrome(bottomInset: CGFloat, topInset: CGFloat) -> some View {
         ZStack {
-            remoteCanvas(isPortrait: true, showsRailReveal: false, topSafe: topInset)
-            portraitTopBar(topInset: topInset)
+            remoteCanvas(topSafe: topInset)
+            topControlStrip(topInset: topInset)
                 .frame(maxHeight: .infinity, alignment: .top)
-            portraitControlBar(
+            bottomControlBar(
                 bottomInset: keyboardOverlap > 0 ? 8 : max(bottomInset, 8)
             )
             .frame(maxHeight: .infinity, alignment: .bottom)
@@ -146,20 +100,12 @@ struct RemoteSessionView: View {
         .padding(.bottom, keyboardOverlap)
     }
 
-    /// Top padding so the quality HUD clears Dynamic Island / notch.
-    /// Portrait also clears the esc/power strip that lives in the top safe band.
-    private func hudTopInset(isPortrait: Bool, topSafe: CGFloat) -> CGFloat {
-        if isPortrait {
-            return max(topSafe, 52) + 6
-        }
-        return max(topSafe, 12) + 6
+    /// Clear Dynamic Island / notch and the esc/power strip in the top safe band.
+    private func hudTopInset(topSafe: CGFloat) -> CGFloat {
+        max(topSafe, 52) + 6
     }
 
-    private func remoteCanvas(
-        isPortrait: Bool,
-        showsRailReveal: Bool,
-        topSafe: CGFloat
-    ) -> some View {
+    private func remoteCanvas(topSafe: CGFloat) -> some View {
         ZStack {
             MetalRemoteView(
                 session: session,
@@ -176,27 +122,17 @@ struct RemoteSessionView: View {
 
             VStack(spacing: 0) {
                 if session.showQualityHUD {
-                    if isCompact || isPortrait {
-                        HStack(spacing: 0) {
-                            Spacer(minLength: 0)
-                            hudPill
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.top, hudTopInset(isPortrait: isPortrait, topSafe: topSafe))
-                        .allowsHitTesting(false)
-                    } else {
-                        topChromeIPad
-                            .padding(.top, max(topSafe, 8))
+                    HStack(spacing: 0) {
+                        Spacer(minLength: 0)
+                        hudPill
                     }
+                    .padding(.horizontal, 10)
+                    .padding(.top, hudTopInset(topSafe: topSafe))
+                    .allowsHitTesting(false)
                 }
                 Spacer(minLength: 0)
             }
             .animation(.easeOut(duration: 0.15), value: session.showQualityHUD)
-
-            if showsRailReveal, railHidden {
-                railRevealTab
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-            }
 
             if case .needPassword = session.phase {
                 passwordSheet
@@ -216,17 +152,17 @@ struct RemoteSessionView: View {
         .ignoresSafeArea(.keyboard)
     }
 
-    private func showKeyboardWhenReady(isPortrait: Bool, phase: SessionPhase) {
-        if isPortrait, phase == .connected {
+    private func showKeyboardWhenReady(phase: SessionPhase) {
+        if phase == .connected {
             session.softKeyboardVisible = true
         }
     }
 
-    // MARK: - Portrait controls
+    // MARK: - Session chrome (top strip + bottom capsule)
 
-    private func portraitTopBar(topInset: CGFloat) -> some View {
+    private func topControlStrip(topInset: CGFloat) -> some View {
         HStack(spacing: 12) {
-            portraitKeyButton(
+            chromeKeyButton(
                 title: "esc",
                 label: "Escape",
                 outerCorner: .topLeading
@@ -249,7 +185,7 @@ struct RemoteSessionView: View {
 
             Spacer(minLength: 0)
 
-            portraitKeyButton(
+            chromeKeyButton(
                 systemName: isAuthenticatingUnlock ? "ellipsis" : "power",
                 label: remoteScreenLocked ? "Unlock remote screen" : "Lock remote screen",
                 emphasized: remoteScreenLocked,
@@ -279,7 +215,7 @@ struct RemoteSessionView: View {
         .accessibilityLabel("Connected to \(session.peerId)")
     }
 
-    private func portraitControlBar(bottomInset: CGFloat) -> some View {
+    private func bottomControlBar(bottomInset: CGFloat) -> some View {
         HStack(spacing: 6) {
             if controlBarShowsTools {
                 // Tools mode: chevron leftmost (points right to return to keys)
@@ -356,7 +292,7 @@ struct RemoteSessionView: View {
         case topTrailing
     }
 
-    private func portraitKeyButton(
+    private func chromeKeyButton(
         title: String? = nil,
         systemName: String? = nil,
         label: String,
@@ -492,7 +428,7 @@ struct RemoteSessionView: View {
             }
             // Restore soft keyboard only after unlock keystrokes are fully done.
             if !session.isSubmittingOsPassword {
-                restorePortraitKeyboard()
+                restoreSoftKeyboard()
             }
         }
     }
@@ -512,109 +448,10 @@ struct RemoteSessionView: View {
         }
     }
 
-    private func restorePortraitKeyboard() {
+    private func restoreSoftKeyboard() {
         if session.phase == .connected {
             session.softKeyboardVisible = true
         }
-    }
-
-    // MARK: - Top chrome (iPad: reserved strip; iPhone uses floating overlay)
-
-    private var topChromeIPad: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            hudPill
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity)
-        // Transparent strip — only the capsule itself is tinted.
-        .background(Color.clear)
-    }
-
-    private var railRevealTab: some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.18)) { railHidden = false }
-        } label: {
-            Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.white.opacity(0.85))
-                .frame(width: 22, height: 56)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.white.opacity(0.14))
-                )
-        }
-        .buttonStyle(.plain)
-        .padding(.leading, 2)
-        .accessibilityLabel("Show toolbar")
-    }
-
-    // MARK: - Sidecar sidebar (single column, same on phone & iPad)
-
-    private func sidecarSidebar(bottomInset: CGFloat, topInset: CGFloat) -> some View {
-        VStack(spacing: 0) {
-            if controlBarShowsTools {
-                // Tools mode: chevron at top (points to keys / down-right metaphor = chevron.right)
-                controlBarChevron(pointsLeading: false)
-                    .padding(.top, topInset)
-                    .padding(.bottom, 6)
-
-                Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
-                    .padding(.bottom, 6)
-
-                ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 6) {
-                        toolZoneButtons
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 2)
-                }
-            } else {
-                // Keys mode: tab, divider, modifiers, then chevron to tools
-                VStack(spacing: 6) {
-                    controlBarTextButton(title: "tab", label: "Tab") {
-                        session.sendTab()
-                    }
-                    .disabled(session.phase != .connected || session.viewOnly)
-
-                    Rectangle()
-                        .fill(Color.white.opacity(0.18))
-                        .frame(width: 22, height: 1)
-                        .padding(.vertical, 2)
-
-                    modifierControlButtons
-
-                    controlBarChevron(pointsLeading: true)
-                }
-                .padding(.top, topInset)
-                .padding(.bottom, 6)
-
-                Spacer(minLength: 0)
-            }
-
-            VStack(spacing: 6) {
-                Circle()
-                    .fill(connectionDotColor)
-                    .frame(width: 8, height: 8)
-                    .accessibilityLabel(session.connectionSummary)
-
-                sidebarIconButton(
-                    systemName: "sidebar.leading",
-                    label: "Hide toolbar"
-                ) {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        controlBarShowsTools = false
-                        railHidden = true
-                    }
-                }
-            }
-            .padding(.bottom, bottomInset)
-            .padding(.top, 6)
-        }
-        .padding(.horizontal, 8)
-        .frame(maxHeight: .infinity, alignment: .top)
-        .animation(.easeInOut(duration: 0.2), value: controlBarShowsTools)
     }
 
     private var disconnectControl: some View {
@@ -690,7 +527,7 @@ struct RemoteSessionView: View {
         .help("Tap: push clipboard · Long-press: type keystrokes")
     }
 
-    /// Tools zone icons for the expanded iPad rail.
+    /// Tools zone icons (disconnect, cursor mode, keyboard, quality, …).
     @ViewBuilder
     private var toolZoneButtons: some View {
         disconnectControl
@@ -746,12 +583,6 @@ struct RemoteSessionView: View {
         }
     }
 
-
-    private var connectionDotColor: Color {
-        if session.phase != .connected { return .orange.opacity(0.9) }
-        if session.connectionDirect { return .green.opacity(0.95) }
-        return .green.opacity(0.55)
-    }
 
     private func modButton(_ title: String, active: Bool, label: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
