@@ -129,6 +129,8 @@ struct HomeView: View {
             if !presented {
                 // Tear down without re-entering leave callback loops.
                 session.userLeaveRemoteUI()
+                SoftKeyboardHost.shared.hide(notify: false)
+                NotificationCenter.default.post(name: .porticoDismissRemoteSession, object: nil)
                 recents.reloadFromRust()
                 if case .failed(let msg) = session.phase {
                     connectError = msg
@@ -139,6 +141,7 @@ struct HomeView: View {
             // Only user-initiated disconnect ends in `.closed`.
             if case .closed = newPhase, showRemote {
                 showRemote = false
+                NotificationCenter.default.post(name: .porticoDismissRemoteSession, object: nil)
             }
             // Non-recoverable errors while still on home (no session UI).
             if case .failed(let msg) = newPhase, !showRemote {
@@ -151,7 +154,12 @@ struct HomeView: View {
         }
         .onAppear {
             session.onRequestLeaveSession = {
-                showRemote = false
+                // Must hop to main; Binding/state writes from session callbacks are sticky otherwise.
+                DispatchQueue.main.async {
+                    showRemote = false
+                    SoftKeyboardHost.shared.hide(notify: false)
+                    NotificationCenter.default.post(name: .porticoDismissRemoteSession, object: nil)
+                }
             }
             recents.load()
             recents.reloadFromRust()

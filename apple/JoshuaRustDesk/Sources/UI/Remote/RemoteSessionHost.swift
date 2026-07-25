@@ -1,6 +1,11 @@
 import SwiftUI
 import UIKit
 
+extension Notification.Name {
+    /// Force-dismiss the full-screen remote session host (Disconnect / Cancel).
+    static let porticoDismissRemoteSession = Notification.Name("porticoDismissRemoteSession")
+}
+
 /// UIKit host that keeps the remote-session shell fixed while the canvas handles
 /// the software-keyboard overlap explicitly.
 ///
@@ -14,6 +19,7 @@ import UIKit
 /// 5. Is presented with `.fullScreen` so it owns the scene's status-bar policy
 final class RemoteSessionHostController: UIHostingController<RemoteSessionView> {
     private var keyboardObservers: [NSObjectProtocol] = []
+    private var dismissObserver: NSObjectProtocol?
 
     override var prefersStatusBarHidden: Bool { true }
 
@@ -31,6 +37,9 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
 
     deinit {
         keyboardObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        if let dismissObserver {
+            NotificationCenter.default.removeObserver(dismissObserver)
+        }
     }
 
     override func viewDidLoad() {
@@ -38,6 +47,13 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
         disableKeyboardSafeArea()
         view.insetsLayoutMarginsFromSafeArea = false
         additionalSafeAreaInsets = .zero
+        dismissObserver = NotificationCenter.default.addObserver(
+            forName: .porticoDismissRemoteSession,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.dismissFromPresentation(animated: true)
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -87,14 +103,22 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
         })
     }
 
+    /// Dismiss this full-screen session no matter how it was presented.
+    func dismissFromPresentation(animated: Bool) {
+        SoftKeyboardHost.shared.hide(notify: false)
+        if let presenter = presentingViewController {
+            presenter.dismiss(animated: animated)
+            return
+        }
+        dismiss(animated: animated, completion: nil)
+    }
+
     private func disableKeyboardSafeArea() {
         if #available(iOS 16.4, *) {
-            // Keep notch/home-indicator container insets; drop keyboard insets.
             safeAreaRegions = .container
         }
         additionalSafeAreaInsets = .zero
         view.insetsLayoutMarginsFromSafeArea = false
-        // Propagate to any child hosting controllers SwiftUI may insert.
         children.forEach { child in
             child.additionalSafeAreaInsets = .zero
             child.view.insetsLayoutMarginsFromSafeArea = false
@@ -102,7 +126,7 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
                 let name = NSStringFromClass(type(of: child))
                 if name.contains("HostingController"),
                    child.responds(to: NSSelectorFromString("setSafeAreaRegions:")) {
-                    child.setValue(1, forKey: "safeAreaRegions") // .container
+                    child.setValue(1, forKey: "safeAreaRegions")
                 }
             }
         }
@@ -111,7 +135,6 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
     private func forceFullWindowFrame() {
         guard let window = view.window else { return }
         let target = window.bounds
-        // If keyboard avoidance nudged us, snap back without animation.
         if view.frame != target || view.bounds.size != target.size {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
@@ -142,7 +165,6 @@ final class RemoteSessionHostController: UIHostingController<RemoteSessionView> 
             ) { [weak self] _ in
                 self?.disableKeyboardSafeArea()
                 self?.forceFullWindowFrame()
-                // Run again after UIKit finishes its own keyboard animation layout.
                 DispatchQueue.main.async {
                     self?.disableKeyboardSafeArea()
                     self?.forceFullWindowFrame()
@@ -162,7 +184,6 @@ struct RemoteSessionPresenter: UIViewControllerRepresentable {
     }
 
     func makeUIViewController(context: Context) -> UIViewController {
-        // Invisible anchor VC in the hierarchy; we present from it.
         let anchor = UIViewController()
         anchor.view.backgroundColor = .clear
         anchor.view.isUserInteractionEnabled = false
@@ -171,60 +192,88 @@ struct RemoteSessionPresenter: UIViewControllerRepresentable {
 
     func updateUIViewController(_ anchor: UIViewController, context: Context) {
         let coordinator = context.coordinator
+        coordinator.wantsPresented = isPresented
+
         if isPresented {
             if coordinator.host == nil {
-                // Dismiss any stale presentation first.
                 if anchor.presentedViewController != nil {
                     anchor.dismiss(animated: false)
                 }
+                Self.dismissStrayRemoteHosts()
+
                 let host = RemoteSessionHostController(
                     rootView: RemoteSessionView(session: session, isPresented: $isPresented)
                 )
                 coordinator.host = host
                 coordinator.presentGeneration &+= 1
                 let gen = coordinator.presentGeneration
-                // Present after the current runloop so the anchor is in the window.
+
                 DispatchQueue.main.async {
-                    // Invalidate if disconnect already fired or a newer present was requested.
                     guard coordinator.presentGeneration == gen,
                           coordinator.host === host,
-                          anchor.presentedViewController == nil
-                    else { return }
-                    // Re-check binding via coordinator flag set on each update.
-                    guard coordinator.wantsPresented else {
-                        coordinator.host = nil
+                          coordinator.wantsPresented,
+                          anchor.view.window != nil
+                    else {
+                        if coordinator.host === host, !coordinator.wantsPresented {
+                            coordinator.host = nil
+                        }
                         return
                     }
-                    anchor.present(host, animated: true)
+                    if anchor.presentedViewController != nil {
+                        anchor.dismiss(animated: false) {
+                            guard coordinator.presentGeneration == gen,
+                                  coordinator.wantsPresented,
+                                  coordinator.host === host
+                            else { return }
+                            anchor.present(host, animated: true)
+                        }
+                    } else {
+                        anchor.present(host, animated: true)
+                    }
                 }
             } else if let host = coordinator.host {
-                // Keep rootView's binding/session fresh.
                 host.rootView = RemoteSessionView(session: session, isPresented: $isPresented)
             }
-            coordinator.wantsPresented = true
         } else {
-            coordinator.wantsPresented = false
-            coordinator.presentGeneration &+= 1 // cancel any in-flight present
+            coordinator.presentGeneration &+= 1
             SoftKeyboardHost.shared.hide(notify: false)
-            if let host = coordinator.host {
-                coordinator.host = nil
-                if host.presentingViewController != nil {
-                    host.dismiss(animated: true)
-                } else if anchor.presentedViewController != nil {
-                    // Presentation may still be settling; dismiss whatever is up.
-                    anchor.dismiss(animated: true)
-                }
-            } else if anchor.presentedViewController != nil {
+
+            let host = coordinator.host
+            coordinator.host = nil
+
+            if let host {
+                host.dismissFromPresentation(animated: true)
+            }
+            if anchor.presentedViewController != nil {
                 anchor.dismiss(animated: true)
+            }
+            Self.dismissStrayRemoteHosts()
+        }
+    }
+
+    private static func dismissStrayRemoteHosts() {
+        for scene in UIApplication.shared.connectedScenes {
+            guard let windowScene = scene as? UIWindowScene else { continue }
+            for window in windowScene.windows {
+                var vc: UIViewController? = window.rootViewController
+                while let current = vc {
+                    if let presented = current.presentedViewController {
+                        if presented is RemoteSessionHostController {
+                            current.dismiss(animated: true)
+                            break
+                        }
+                        vc = presented
+                    } else {
+                        break
+                    }
+                }
             }
         }
     }
 
     final class Coordinator {
         var host: RemoteSessionHostController?
-        /// Bumped to cancel a pending async `present` after disconnect.
         var presentGeneration: UInt = 0
-        /// Mirrors latest `isPresented` for the async present guard.
         var wantsPresented = false
     }
 }

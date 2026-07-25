@@ -628,8 +628,12 @@ struct RemoteSessionView: View {
         controlBarShowsTools = false
         session.softKeyboardVisible = false
         SoftKeyboardHost.shared.hide(notify: false)
+        // 1) Tear down session + ask Home to clear showRemote
         session.close()
+        // 2) Binding path (SwiftUI)
         isPresented = false
+        // 3) Force-dismiss the UIKit full-screen host (binding alone is unreliable)
+        NotificationCenter.default.post(name: .porticoDismissRemoteSession, object: nil)
     }
 
     /// Keys zone: Tab (leftmost) | sticky modifiers.
