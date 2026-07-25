@@ -12,8 +12,9 @@ struct RemoteSessionView: View {
     @State private var sidebarExpanded = true
     /// Fully hide the rail on compact (edge tab restores it).
     @State private var railHidden = false
-    /// Compact overflow tools panel (the modal host needs directly tappable controls).
-    @State private var showToolsPanel = false
+    /// When true, portrait/side control bar shows tools (chevron on left);
+    /// when false, shows keys: tab + modifiers (chevron on right).
+    @State private var controlBarShowsTools = false
     /// Bottom-anchored system keyboard overlap reported by the UIKit layout bridge.
     @State private var keyboardOverlap: CGFloat = 0
     @State private var remoteScreenLocked = false
@@ -62,8 +63,6 @@ struct RemoteSessionView: View {
                             .frame(width: sidebarWidth)
                             .frame(maxHeight: .infinity)
                             .padding(.bottom, keyboardOverlap)
-                            .opacity(showToolsPanel ? 0 : 1)
-                            .allowsHitTesting(!showToolsPanel)
                         }
                     }
                 }
@@ -115,12 +114,12 @@ struct RemoteSessionView: View {
             if isCompact || isShortHeight {
                 sidebarExpanded = false
                 railHidden = false
-                showToolsPanel = false
+                controlBarShowsTools = false
             }
         }
         .onChange(of: session.softKeyboardVisible) { visible in
             if visible {
-                showToolsPanel = false
+                controlBarShowsTools = false
             }
         }
         .onChange(of: session.phase) { phase in
@@ -130,7 +129,7 @@ struct RemoteSessionView: View {
         }
         .onDisappear {
             session.softKeyboardVisible = false
-            showToolsPanel = false
+            controlBarShowsTools = false
         }
     }
 
@@ -139,14 +138,10 @@ struct RemoteSessionView: View {
             remoteCanvas(isPortrait: true, showsRailReveal: false, topSafe: topInset)
             portraitTopBar(topInset: topInset)
                 .frame(maxHeight: .infinity, alignment: .top)
-                .opacity(showToolsPanel ? 0 : 1)
-                .allowsHitTesting(!showToolsPanel)
             portraitControlBar(
                 bottomInset: keyboardOverlap > 0 ? 8 : max(bottomInset, 8)
             )
             .frame(maxHeight: .infinity, alignment: .bottom)
-            .opacity(showToolsPanel ? 0 : 1)
-            .allowsHitTesting(!showToolsPanel)
         }
         .padding(.bottom, keyboardOverlap)
     }
@@ -203,13 +198,11 @@ struct RemoteSessionView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
 
-            if showToolsPanel {
-                toolsPanelOverlay
-            }
-
             if case .needPassword = session.phase {
                 passwordSheet
             }
+            // Recoverable drops stay in `.connecting` and auto-reconnect — no timeout wall.
+            // Only non-recoverable auth/config errors use a failure sheet.
             if case .failed(let message) = session.phase {
                 failureOverlay(message)
             }
@@ -233,7 +226,11 @@ struct RemoteSessionView: View {
 
     private func portraitTopBar(topInset: CGFloat) -> some View {
         HStack(spacing: 12) {
-            portraitKeyButton(title: "esc", label: "Escape") {
+            portraitKeyButton(
+                title: "esc",
+                label: "Escape",
+                outerCorner: .topLeading
+            ) {
                 session.sendEscape()
             }
             .disabled(session.phase != .connected || session.viewOnly)
@@ -255,7 +252,8 @@ struct RemoteSessionView: View {
             portraitKeyButton(
                 systemName: isAuthenticatingUnlock ? "ellipsis" : "power",
                 label: remoteScreenLocked ? "Unlock remote screen" : "Lock remote screen",
-                emphasized: remoteScreenLocked
+                emphasized: remoteScreenLocked,
+                outerCorner: .topTrailing
             ) {
                 handleRemotePowerButton()
             }
@@ -283,9 +281,25 @@ struct RemoteSessionView: View {
 
     private func portraitControlBar(bottomInset: CGFloat) -> some View {
         HStack(spacing: 6) {
-            disconnectControl
-            inputControlButtons
-            moreToolsControl
+            if controlBarShowsTools {
+                // Tools mode: chevron leftmost (points right to return to keys)
+                controlBarChevron(pointsLeading: false)
+
+                controlBarZoneDivider
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        toolZoneButtons
+                    }
+                }
+            } else {
+                // Keys mode: tab | modifiers | chevron (points left to open tools)
+                keyZoneControls
+
+                controlBarZoneDivider
+
+                controlBarChevron(pointsLeading: true)
+            }
         }
         .padding(6)
         .background(.ultraThinMaterial, in: Capsule())
@@ -294,6 +308,52 @@ struct RemoteSessionView: View {
         .padding(.bottom, bottomInset)
         .frame(maxWidth: .infinity, alignment: .center)
         .shadow(color: .black.opacity(0.42), radius: 12, y: 5)
+        .animation(.easeInOut(duration: 0.2), value: controlBarShowsTools)
+    }
+
+    private var controlBarZoneDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.18))
+            .frame(width: 1, height: 22)
+            .padding(.horizontal, 2)
+    }
+
+    /// Left chevron = open tools (on right of keys). Right chevron = back to keys (on left of tools).
+    private func controlBarChevron(pointsLeading: Bool) -> some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                controlBarShowsTools = pointsLeading
+            }
+        } label: {
+            Image(systemName: pointsLeading ? "chevron.left" : "chevron.right")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Color.white.opacity(0.12)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(pointsLeading ? "Show tools" : "Show keys")
+        .help(pointsLeading ? "Show tools" : "Show keys")
+    }
+
+    /// Device display corner radius (matches the physical screen bezel curve).
+    private var screenCornerRadius: CGFloat {
+        let screen = UIScreen.main
+        // KVC used for layout that should match the display contour.
+        if let radius = screen.value(forKey: "displayCornerRadius") as? CGFloat, radius > 0 {
+            return radius
+        }
+        if let radius = screen.value(forKey: "_displayCornerRadius") as? CGFloat, radius > 0 {
+            return radius
+        }
+        // Fallback: modern iPhone continuous corner is large relative to control size.
+        return 44
+    }
+
+    /// Which corner of a top chrome button sits against the device bezel.
+    private enum TopChromeOuterCorner {
+        case topLeading
+        case topTrailing
     }
 
     private func portraitKeyButton(
@@ -301,9 +361,22 @@ struct RemoteSessionView: View {
         systemName: String? = nil,
         label: String,
         emphasized: Bool = false,
+        outerCorner: TopChromeOuterCorner? = nil,
         action: @escaping () -> Void
     ) -> some View {
-        Button(action: action) {
+        // Only the outer corner uses the screen radius; inner corners stay compact.
+        let inner: CGFloat = 11
+        let outer = screenCornerRadius
+        let shape = UnevenRoundedRectangle(
+            cornerRadii: RectangleCornerRadii(
+                topLeading: outerCorner == .topLeading ? outer : inner,
+                bottomLeading: inner,
+                bottomTrailing: inner,
+                topTrailing: outerCorner == .topTrailing ? outer : inner
+            ),
+            style: .continuous
+        )
+        return Button(action: action) {
             Group {
                 if let systemName {
                     Image(systemName: systemName)
@@ -316,11 +389,10 @@ struct RemoteSessionView: View {
             .foregroundStyle(emphasized ? Color.black : Color.white)
             .frame(width: 44, height: 40)
             .background(
-                RoundedRectangle(cornerRadius: 11, style: .continuous)
+                shape
                     .fill(emphasized ? Color.white : Color.black.opacity(0.62))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 11, style: .continuous)
-                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        shape.stroke(Color.white.opacity(0.16), lineWidth: 1)
                     )
             )
         }
@@ -482,32 +554,43 @@ struct RemoteSessionView: View {
 
     private func sidecarSidebar(bottomInset: CGFloat, topInset: CGFloat) -> some View {
         VStack(spacing: 0) {
-            disconnectControl
-            .padding(.top, topInset)
-            .padding(.bottom, 6)
+            if controlBarShowsTools {
+                // Tools mode: chevron at top (points to keys / down-right metaphor = chevron.right)
+                controlBarChevron(pointsLeading: false)
+                    .padding(.top, topInset)
+                    .padding(.bottom, 6)
 
-            Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
-                .padding(.bottom, 6)
+                Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+                    .padding(.bottom, 6)
 
-            ScrollView(.vertical, showsIndicators: false) {
+                ScrollView(.vertical, showsIndicators: false) {
+                    VStack(spacing: 6) {
+                        toolZoneButtons
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 2)
+                }
+            } else {
+                // Keys mode: tab, divider, modifiers, then chevron to tools
                 VStack(spacing: 6) {
-                    inputControlButtons
+                    controlBarTextButton(title: "tab", label: "Tab") {
+                        session.sendTab()
+                    }
+                    .disabled(session.phase != .connected || session.viewOnly)
 
-                    Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
+                    Rectangle()
+                        .fill(Color.white.opacity(0.18))
+                        .frame(width: 22, height: 1)
+                        .padding(.vertical, 2)
 
                     modifierControlButtons
 
-                    Divider().frame(width: 28).overlay(Color.white.opacity(0.2))
-
-                    if isCompact {
-                        // ⋯ opens a directly tappable panel inside the modal host.
-                        moreToolsControl
-                    } else if sidebarExpanded {
-                        advancedToolButtons
-                    }
+                    controlBarChevron(pointsLeading: true)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 2)
+                .padding(.top, topInset)
+                .padding(.bottom, 6)
+
+                Spacer(minLength: 0)
             }
 
             VStack(spacing: 6) {
@@ -516,24 +599,13 @@ struct RemoteSessionView: View {
                     .frame(width: 8, height: 8)
                     .accessibilityLabel(session.connectionSummary)
 
-                if !isCompact {
-                    sidebarIconButton(
-                        systemName: sidebarExpanded ? "chevron.up" : "chevron.down",
-                        label: sidebarExpanded ? "Collapse" : "Expand"
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            sidebarExpanded.toggle()
-                        }
-                    }
-                } else {
-                    sidebarIconButton(
-                        systemName: "sidebar.leading",
-                        label: "Hide toolbar"
-                    ) {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            showToolsPanel = false
-                            railHidden = true
-                        }
+                sidebarIconButton(
+                    systemName: "sidebar.leading",
+                    label: "Hide toolbar"
+                ) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        controlBarShowsTools = false
+                        railHidden = true
                     }
                 }
             }
@@ -542,6 +614,7 @@ struct RemoteSessionView: View {
         }
         .padding(.horizontal, 8)
         .frame(maxHeight: .infinity, alignment: .top)
+        .animation(.easeInOut(duration: 0.2), value: controlBarShowsTools)
     }
 
     private var disconnectControl: some View {
@@ -551,35 +624,39 @@ struct RemoteSessionView: View {
         }
     }
 
+    /// Keys zone: Tab (leftmost) | sticky modifiers.
     @ViewBuilder
-    private var inputControlButtons: some View {
-        sidebarIconButton(
-            systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
-            label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
-            emphasized: true
-        ) {
-            session.toggleRemoteCursor()
+    private var keyZoneControls: some View {
+        controlBarTextButton(title: "tab", label: "Tab") {
+            session.sendTab()
         }
+        .disabled(session.phase != .connected || session.viewOnly)
 
-        sidebarIconButton(
-            systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
-            label: "Keyboard"
-        ) {
-            session.softKeyboardVisible.toggle()
-        }
+        controlBarZoneDivider
 
-        clipboardControl
-
-        if session.hasMultipleDisplays {
-            sidebarIconButton(
-                systemName: "rectangle.on.rectangle",
-                label: "Display \(session.displaySummary)",
-                emphasized: true
-            ) {
-                session.cycleDisplay()
-            }
-        }
+        modifierControlButtons
     }
+
+    @ViewBuilder
+    private var modifierControlButtons: some View {
+        modButton("⌃", active: session.modControl, label: "Control") {
+            session.toggleControl()
+        }
+        .disabled(session.phase != .connected || session.viewOnly)
+        modButton("⌥", active: session.modOption, label: "Option") {
+            session.toggleOption()
+        }
+        .disabled(session.phase != .connected || session.viewOnly)
+        modButton("⇧", active: session.modShift, label: "Shift") {
+            session.toggleShift()
+        }
+        .disabled(session.phase != .connected || session.viewOnly)
+        modButton("⌘", active: session.modCommand, label: "Command") {
+            session.toggleCommand()
+        }
+        .disabled(session.phase != .connected || session.viewOnly)
+    }
+
 
     private var clipboardControl: some View {
         Button {
@@ -601,36 +678,24 @@ struct RemoteSessionView: View {
         .help("Tap: push clipboard · Long-press: type keystrokes")
     }
 
+    /// Tools zone icons for the expanded iPad rail.
     @ViewBuilder
-    private var modifierControlButtons: some View {
-        modButton("⌃", active: session.modControl, label: "Control") {
-            session.toggleControl()
-        }
-        modButton("⌥", active: session.modOption, label: "Option") {
-            session.toggleOption()
-        }
-        modButton("⇧", active: session.modShift, label: "Shift") {
-            session.toggleShift()
-        }
-        modButton("⌘", active: session.modCommand, label: "Command") {
-            session.toggleCommand()
-        }
-    }
-
-    private var moreToolsControl: some View {
+    private var toolZoneButtons: some View {
+        disconnectControl
         sidebarIconButton(
-            systemName: showToolsPanel ? "ellipsis.circle.fill" : "ellipsis.circle",
-            label: "More tools",
-            emphasized: showToolsPanel
+            systemName: session.showRemoteCursor ? "cursorarrow.click.2" : "hand.tap.fill",
+            label: session.showRemoteCursor ? "Cursor mode" : "Touch mode",
+            emphasized: true
         ) {
-            withAnimation(.easeOut(duration: 0.15)) {
-                showToolsPanel.toggle()
-            }
+            session.toggleRemoteCursor()
         }
-    }
-
-    @ViewBuilder
-    private var advancedToolButtons: some View {
+        sidebarIconButton(
+            systemName: session.softKeyboardVisible ? "keyboard.chevron.compact.down" : "keyboard",
+            label: "Keyboard"
+        ) {
+            session.softKeyboardVisible.toggle()
+        }
+        clipboardControl
         sidebarIconButton(
             systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
             label: session.viewOnly ? "View only" : "Control"
@@ -658,106 +723,17 @@ struct RemoteSessionView: View {
                 session.toggleQualityHUD()
             }
         }
-    }
-
-    /// Floating tools panel — tappable buttons (not UIMenu).
-    private var toolsPanelOverlay: some View {
-        ZStack(alignment: .leading) {
-            Color.black.opacity(0.35)
-                .ignoresSafeArea()
-                .onTapGesture {
-                    withAnimation(.easeOut(duration: 0.15)) { showToolsPanel = false }
-                }
-
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Keyboard modifiers")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                    HStack(spacing: 8) {
-                        modifierControlButtons
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-
-                Divider().overlay(Color.white.opacity(0.12))
-
-                toolsPanelRow(
-                    systemName: session.viewOnly ? "eye.fill" : "hand.point.up.left.fill",
-                    title: session.viewOnly ? "View only" : "Control mode"
-                ) {
-                    session.toggleViewOnly()
-                }
-                toolsPanelRow(
-                    systemName: "sparkles.tv",
-                    title: "Quality: \(session.qualityLabel)"
-                ) {
-                    session.cycleQuality()
-                }
-                toolsPanelRow(
-                    systemName: session.isHardDecodeCodec ? "cpu.fill" : "cpu",
-                    title: "Codec: \(session.codecPreference)"
-                ) {
-                    session.cycleCodecPreference()
-                }
-                toolsPanelRow(
-                    systemName: session.showQualityHUD ? "chart.bar.fill" : "chart.bar",
-                    title: session.showQualityHUD ? "Hide status HUD" : "Show status HUD"
-                ) {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        session.toggleQualityHUD()
-                    }
-                }
-                if session.hasMultipleDisplays {
-                    toolsPanelRow(
-                        systemName: "rectangle.on.rectangle",
-                        title: "Display \(session.displaySummary)"
-                    ) {
-                        session.cycleDisplay()
-                    }
-                }
+        if session.hasMultipleDisplays {
+            sidebarIconButton(
+                systemName: "rectangle.on.rectangle",
+                label: "Display \(session.displaySummary)",
+                emphasized: true
+            ) {
+                session.cycleDisplay()
             }
-            .padding(.vertical, 8)
-            .frame(width: 260, alignment: .leading)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
-            )
-            // Anchor just to the right of the 56pt rail.
-            .padding(.leading, 64)
-            .padding(.top, 56)
-            .shadow(color: .black.opacity(0.45), radius: 20, y: 8)
         }
-        .transition(.opacity)
-        .zIndex(50)
     }
 
-    private func toolsPanelRow(
-        systemName: String,
-        title: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button {
-            action()
-        } label: {
-            HStack(spacing: 14) {
-                Image(systemName: systemName)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 28)
-                Text(title)
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.white)
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 14)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
 
     private var connectionDotColor: Color {
         if session.phase != .connected { return .orange.opacity(0.9) }
@@ -797,6 +773,24 @@ struct RemoteSessionView: View {
                     Circle()
                         .fill(Color.white.opacity(emphasized ? 0.16 : 0.08))
                 )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    /// Compact text key (tab, etc.) matching the circular control-bar chrome.
+    private func controlBarTextButton(
+        title: String,
+        label: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.92))
+                .frame(width: 40, height: 40)
+                .background(Circle().fill(Color.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
@@ -907,6 +901,15 @@ struct RemoteSessionView: View {
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(.white)
                 .multilineTextAlignment(.center)
+            if !session.lastError.isEmpty,
+               session.connectionStage.localizedCaseInsensitiveContains("reconnect")
+                || session.statusText.localizedCaseInsensitiveContains("retry") {
+                Text(session.lastError)
+                    .font(.caption)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(3)
+            }
             if !session.peerId.isEmpty {
                 Text(session.peerId)
                     .font(.caption.monospacedDigit())
@@ -959,12 +962,13 @@ struct RemoteSessionView: View {
         .padding(.horizontal, 16)
     }
 
+    /// Shown only for non-recoverable errors (wrong password, access denied, …).
     private func failureOverlay(_ msg: String) -> some View {
         VStack(spacing: 14) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.largeTitle)
                 .foregroundStyle(.white)
-            Text("Connection failed")
+            Text("Can't connect")
                 .font(.headline)
                 .foregroundStyle(.white)
             Text(msg)
@@ -979,7 +983,7 @@ struct RemoteSessionView: View {
                 }
                 .buttonStyle(.bordered)
                 .tint(.white)
-                Button("Retry") {
+                Button("Try again") {
                     session.reconnect()
                 }
                 .buttonStyle(.borderedProminent)

@@ -135,15 +135,18 @@ struct HomeView: View {
             }
         }
         .onChange(of: session.phase) { newPhase in
+            // Only user-initiated disconnect ends in `.closed`.
             if case .closed = newPhase, showRemote {
                 showRemote = false
             }
+            // Non-recoverable errors while still on home (no session UI).
             if case .failed(let msg) = newPhase, !showRemote {
                 connectError = msg
             }
             if case .connecting = newPhase {
                 connectError = nil
             }
+            // Auto-reconnect keeps the remote UI up (phase stays `.connecting`).
         }
         .onAppear {
             recents.load()

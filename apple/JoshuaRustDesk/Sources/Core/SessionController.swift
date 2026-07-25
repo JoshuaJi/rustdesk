@@ -114,8 +114,14 @@ final class SessionController: ObservableObject {
     private var pasteboardObserver: NSObjectProtocol?
     private var clipboardNoteWork: DispatchWorkItem?
     private var connectTimeoutWork: DispatchWorkItem?
-    /// Seconds to wait for peer_info / frames before failing.
+    private var reconnectWork: DispatchWorkItem?
+    /// Seconds to wait for peer_info / frames before retrying.
     private let connectTimeoutSeconds: TimeInterval = 45
+    /// User tapped Disconnect/Cancel — never auto-reconnect after that.
+    private var userInitiatedClose = false
+    private var reconnectAttempt = 0
+    private let reconnectBaseDelay: TimeInterval = 1.5
+    private let reconnectMaxDelay: TimeInterval = 12
 
     // Strong ref so C callback can recover self
     private var retainedSelf: Unmanaged<SessionController>?
@@ -126,7 +132,33 @@ final class SessionController: ObservableObject {
     }
 
     func connect(peerId: String, password: String, forceRelay: Bool = false, rememberPassword: Bool = false) {
-        close()
+        startConnection(
+            peerId: peerId,
+            password: password,
+            forceRelay: forceRelay,
+            rememberPassword: rememberPassword,
+            isAutoReconnect: false
+        )
+    }
+
+    /// Start or restart a session. Auto-reconnect keeps peer credentials and does not
+    /// surface a permanent failure UI for recoverable network/timeout drops.
+    private func startConnection(
+        peerId: String,
+        password: String,
+        forceRelay: Bool,
+        rememberPassword: Bool,
+        isAutoReconnect: Bool
+    ) {
+        // Tear down any prior transport without treating this as a user disconnect.
+        tearDownTransport(markClosed: false)
+
+        if !isAutoReconnect {
+            cancelReconnect()
+            reconnectAttempt = 0
+        }
+        userInitiatedClose = false
+
         self.peerId = peerId
         self.lastPassword = password
         self.lastForceRelay = forceRelay
@@ -134,7 +166,13 @@ final class SessionController: ObservableObject {
         sessionUUID = UUID().uuidString
         phase = .connecting
         lastError = ""
-        setStage("Looking up \(peerId)…")
+        if isAutoReconnect {
+            setStage(reconnectAttempt > 1
+                ? "Reconnecting… (try \(reconnectAttempt))"
+                : "Reconnecting…")
+        } else {
+            setStage("Looking up \(peerId)…")
+        }
         softKeyboardVisible = false
         viewOnly = false
         audioMuted = true
@@ -183,7 +221,7 @@ final class SessionController: ObservableObject {
             fail(msg)
             return
         }
-        setStage("Contacting peer…")
+        setStage(isAutoReconnect ? "Reconnecting… contacting peer" : "Contacting peer…")
 
         retainedSelf = Unmanaged.passRetained(self)
         let user = retainedSelf!.toOpaque()
@@ -217,11 +255,14 @@ final class SessionController: ObservableObject {
     /// Re-run the last connection (same peer / password / relay prefs).
     func reconnect() {
         guard !peerId.isEmpty else { return }
-        connect(
+        cancelReconnect()
+        reconnectAttempt = 0
+        startConnection(
             peerId: peerId,
             password: lastPassword,
             forceRelay: lastForceRelay,
-            rememberPassword: rememberPassword
+            rememberPassword: rememberPassword,
+            isAutoReconnect: false
         )
     }
 
@@ -243,7 +284,99 @@ final class SessionController: ObservableObject {
         statusText = "Logging in…"
     }
 
+    /// User-facing disconnect — stops auto-reconnect and tears the session down.
     func close() {
+        userInitiatedClose = true
+        cancelReconnect()
+        tearDownTransport(markClosed: true)
+        statusText = "Disconnected"
+        connectionStage = ""
+    }
+
+    private func setStage(_ text: String) {
+        connectionStage = text
+        statusText = text
+    }
+
+    /// Recoverable failures auto-reconnect; auth/config errors stay on a failure state.
+    private func fail(_ message: String) {
+        cancelConnectTimeout()
+        lastError = message
+        active = false
+
+        if userInitiatedClose {
+            phase = .failed(message)
+            statusText = message
+            connectionStage = "Failed"
+            return
+        }
+
+        if isNonRecoverableFailure(message) {
+            tearDownTransport(markClosed: false)
+            phase = .failed(message)
+            statusText = message
+            connectionStage = "Failed"
+            return
+        }
+
+        scheduleAutoReconnect(reason: message)
+    }
+
+    private func isNonRecoverableFailure(_ message: String) -> Bool {
+        let m = message.lowercased()
+        // Wrong password / 2FA / explicit deny — user must act; do not spin reconnect.
+        if m.contains("password") { return true }
+        if m.contains("2fa") || m.contains("two-factor") || m.contains("verification code") {
+            return true
+        }
+        if m.contains("access denied") || m.contains("connection denied") || m.contains("forbidden") {
+            return true
+        }
+        return false
+    }
+
+    private func scheduleAutoReconnect(reason: String) {
+        guard !userInitiatedClose, !peerId.isEmpty else {
+            phase = .failed(reason)
+            statusText = reason
+            connectionStage = "Failed"
+            return
+        }
+
+        tearDownTransport(markClosed: false)
+        reconnectAttempt += 1
+        let exp = min(Double(reconnectAttempt - 1), 5)
+        let delay = min(reconnectBaseDelay * pow(1.6, exp), reconnectMaxDelay)
+
+        phase = .connecting
+        lastError = reason
+        setStage("Reconnecting in \(Int(delay.rounded()))s…")
+        if !reason.isEmpty {
+            statusText = "\(reason) · retrying"
+        }
+
+        cancelReconnect()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.userInitiatedClose else { return }
+            self.startConnection(
+                peerId: self.peerId,
+                password: self.lastPassword,
+                forceRelay: self.lastForceRelay,
+                rememberPassword: self.rememberPassword,
+                isAutoReconnect: true
+            )
+        }
+        reconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func cancelReconnect() {
+        reconnectWork?.cancel()
+        reconnectWork = nil
+    }
+
+    /// Stop Rust session / observers. When `markClosed`, publish `.closed` (user left).
+    private func tearDownTransport(markClosed: Bool) {
         cancelConnectTimeout()
         let wasActive = active
             || phase == .connecting
@@ -252,38 +385,27 @@ final class SessionController: ObservableObject {
                 if case .failed = phase { return true }
                 return false
             }()
-        guard wasActive else {
-            releaseRetained()
-            return
-        }
+            || {
+                if case .connected = phase { return true }
+                return false
+            }()
+
         softKeyboardVisible = false
         stopPasteboardObserver()
-        // Release sticky modifiers on the peer while session is still active.
         if active {
             clearModifiers(sendKeyUp: true)
         }
         active = false
         if !sessionUUID.isEmpty {
             rd_session_close(sessionUUID)
+            sessionUUID = ""
         }
-        phase = .closed
-        statusText = "Disconnected"
-        connectionStage = ""
         releaseRetained()
-    }
-
-    private func setStage(_ text: String) {
-        connectionStage = text
-        statusText = text
-    }
-
-    private func fail(_ message: String) {
-        cancelConnectTimeout()
-        lastError = message
-        phase = .failed(message)
-        statusText = message
-        connectionStage = "Failed"
-        active = false
+        if markClosed {
+            phase = .closed
+        } else if !wasActive, markClosed {
+            phase = .closed
+        }
     }
 
     private func armConnectTimeout() {
@@ -293,11 +415,11 @@ final class SessionController: ObservableObject {
             guard self.phase == .connecting || self.phase == .needPassword else { return }
             // needPassword is interactive — only timeout pure connecting.
             guard self.phase == .connecting else { return }
-            self.fail("Connection timed out after \(Int(self.connectTimeoutSeconds))s. Check ID server, network, or try Force relay.")
-            if !self.sessionUUID.isEmpty {
-                rd_session_close(self.sessionUUID)
-            }
-            self.releaseRetained()
+            guard !self.userInitiatedClose else { return }
+            // No permanent timeout screen — keep trying.
+            self.scheduleAutoReconnect(
+                reason: "Still connecting after \(Int(self.connectTimeoutSeconds))s"
+            )
         }
         connectTimeoutWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + connectTimeoutSeconds, execute: work)
@@ -310,6 +432,8 @@ final class SessionController: ObservableObject {
 
     private func markConnected(summary: String? = nil) {
         cancelConnectTimeout()
+        cancelReconnect()
+        reconnectAttempt = 0
         phase = .connected
         connectionStage = "Connected"
         if let summary, !summary.isEmpty {
@@ -510,6 +634,11 @@ final class SessionController: ObservableObject {
 
     func sendEscape() {
         pressKey(usbHid: 0x29)
+    }
+
+    /// USB HID keyboard Tab (0x2B).
+    func sendTab() {
+        pressKey(usbHid: 0x2B)
     }
 
     /// Use RustDesk's native lock-screen command instead of synthesizing a shortcut.
@@ -974,15 +1103,21 @@ final class SessionController: ObservableObject {
             case 2:
                 self.cancelConnectTimeout()
                 self.active = false
-                // Don't overwrite an explicit failure with "closed".
+                // Explicit permanent failure already shown — leave it.
                 if case .failed = self.phase {
                     self.releaseRetained()
                     return
                 }
-                self.phase = .closed
-                self.statusText = "Session closed"
-                self.connectionStage = "Closed"
-                self.releaseRetained()
+                // User hit Disconnect — finish as closed.
+                if self.userInitiatedClose {
+                    self.phase = .closed
+                    self.statusText = "Session closed"
+                    self.connectionStage = "Closed"
+                    self.releaseRetained()
+                    return
+                }
+                // Unexpected drop — silent auto-reconnect, no failure screen.
+                self.scheduleAutoReconnect(reason: "Connection lost")
             default:
                 break
             }
