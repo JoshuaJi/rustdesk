@@ -51,9 +51,11 @@ protocol RemoteGestureEngineDelegate: AnyObject {
 /// | 1-finger drag | left-drag absolute | move cursor |
 /// | 2-finger tap | right at centroid | right at cursor |
 /// | 2-finger double-tap | reset zoom | reset zoom |
-/// | 2-finger pan @ 1× | scroll wheel | scroll wheel |
-/// | 2-finger pan zoomed | pan content | pan content |
-/// | 2-finger pinch | zoom | zoom |
+/// | 2-finger pan (any zoom) | mouse scroll wheel | mouse scroll wheel |
+/// | 2-finger pinch | zoom around centroid | zoom around centroid |
+///
+/// Two-finger **translate** is always remote mouse-wheel scroll (not viewport pan).
+/// Viewport pan is separate (e.g. trackpad cursor + edge follow while zoomed).
 final class RemoteGestureEngine {
     weak var delegate: RemoteGestureEngineDelegate?
 
@@ -71,11 +73,13 @@ final class RemoteGestureEngine {
         var twoFingerTapDuration: CFTimeInterval = 0.42
         var twoFingerDoubleInterval: CFTimeInterval = 0.32
         /// Span must change by this fraction to commit (or upgrade) to pinch.
-        /// Keep lower than multiCommitTravel tends to allow — otherwise two-finger
-        /// motion locks into scroll before pinch is recognized.
-        var pinchCommitRatio: CGFloat = 0.06
+        /// Higher = prefer two-finger pan/scroll over accidental pinch.
+        var pinchCommitRatio: CGFloat = 0.09
+        /// When already committed to pan/scroll, only upgrade to pinch if span change
+        /// is at least this fraction of centroid travel (avoids pan→pinch steal).
+        var pinchDominateTravel: CGFloat = 0.45
         /// Centroid travel before scroll/pan commit (when not pinching).
-        var multiCommitTravel: CGFloat = 22
+        var multiCommitTravel: CGFloat = 18
         var wheelStepPoints: CGFloat = 14
         var minZoom: CGFloat = 1
         var maxZoom: CGFloat = 6
@@ -431,11 +435,22 @@ final class RemoteGestureEngine {
         let spanRatio = s / max(m.startSpan, 1)
         let dcx = c.x - m.lastCentroid.x
         let dcy = c.y - m.lastCentroid.y
+        let spanAbsChange = abs(s - m.startSpan)
 
-        // Pinch always wins: even if we already chose scroll/pan (common when fingers
-        // drift before spreading), upgrade to pinch once span change is clear.
+        // Classify two-finger intent:
+        // - Pinch when finger distance changes enough (and dominates travel if already scrolling)
+        // - Else mouse-wheel scroll (centroid motion) — at any zoom level
         if abs(spanRatio - 1) >= config.pinchCommitRatio {
-            if m.commit != .pinch {
+            let shouldPinch: Bool
+            if m.commit == .scroll || m.commit == .pan {
+                // Require span change to dominate so a two-finger drag doesn't become pinch.
+                let travel = max(m.maxTravel, 1)
+                shouldPinch = spanAbsChange >= travel * config.pinchDominateTravel
+                    || abs(spanRatio - 1) >= config.pinchCommitRatio * 1.6
+            } else {
+                shouldPinch = true
+            }
+            if shouldPinch, m.commit != .pinch {
                 // Re-base so zoom continues smoothly from the current level
                 // (avoids a jump after a scroll-then-pinch sequence).
                 m.baseZoom = delegate?.gestureEngineZoom ?? m.baseZoom
@@ -444,8 +459,8 @@ final class RemoteGestureEngine {
                 twoFingerTapWork?.cancel()
             }
         } else if m.commit == nil, m.maxTravel >= config.multiCommitTravel {
-            let zoom = delegate?.gestureEngineZoom ?? 1
-            m.commit = zoom > 1.05 ? .pan : .scroll
+            // Always remote mouse-wheel — not viewport pan — when two fingers translate.
+            m.commit = .scroll
             twoFingerTapWork?.cancel()
         }
 
@@ -456,8 +471,9 @@ final class RemoteGestureEngine {
         case .pinch:
             let z = min(config.maxZoom, max(config.minZoom, m.baseZoom * liveRatio))
             emit(.zoom(to: z, anchor: c))
-        case .scroll:
-            // Natural iOS: finger up → content up → wheel y positive in our earlier mapping.
+        case .scroll, .pan:
+            // `.pan` kept for API compatibility; two-finger translate = mouse wheel.
+            // Natural iOS: finger up → content up → wheel y positive.
             m.wheelAccY += dcy
             m.wheelAccX += dcx
             while abs(m.wheelAccY) >= config.wheelStepPoints {
@@ -470,8 +486,6 @@ final class RemoteGestureEngine {
                 m.wheelAccX -= CGFloat(dir) * config.wheelStepPoints
                 emit(.wheel(x: dir, y: 0))
             }
-        case .pan:
-            emit(.panViewport(dx: dcx, dy: dcy))
         case .none:
             break
         }
