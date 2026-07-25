@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		23902BFD12AAA06E46B30704 /* SystemConfigurationCompat.m in Sources */ = {isa = PBXBuildFile; fileRef = 278E467F1A2874BDF10D4406 /* SystemConfigurationCompat.m */; };
 		29C009E2FE8311D79C5A752D /* RemoteSessionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4F40A717989DC460F5381E73 /* RemoteSessionView.swift */; };
 		36F3B176AA9DF500C7CE2323 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */; };
 		3955AA6B689682A5D5FE3DC6 /* RemoteAudioPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4858BCFAAD5294E78AA23407 /* RemoteAudioPlayer.swift */; };
@@ -29,6 +30,7 @@
 		0ADB239B03307893EC752509 /* SessionController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionController.swift; sourceTree = "<group>"; };
 		118BE4B39E6656C7300D32DD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		26AD6519E8136BA4929C6B2C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		278E467F1A2874BDF10D4406 /* SystemConfigurationCompat.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = SystemConfigurationCompat.m; sourceTree = "<group>"; };
 		27FA69267AA44DA0EEF3E027 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		3F58372ED060879D51527201 /* RecentPeersStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentPeersStore.swift; sourceTree = "<group>"; };
 		4858BCFAAD5294E78AA23407 /* RemoteAudioPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemoteAudioPlayer.swift; sourceTree = "<group>"; };
@@ -80,6 +82,7 @@
 				4858BCFAAD5294E78AA23407 /* RemoteAudioPlayer.swift */,
 				5B6CF95444DC01CA276A593D /* RustDeskBridge.swift */,
 				0ADB239B03307893EC752509 /* SessionController.swift */,
+				278E467F1A2874BDF10D4406 /* SystemConfigurationCompat.m */,
 			);
 			path = Core;
 			sourceTree = "<group>";
@@ -221,6 +224,7 @@
 				625245FD03F3604036D3221F /* SessionController.swift in Sources */,
 				98FA0D7DA2DC82B03BF1C7D5 /* SettingsView.swift in Sources */,
 				56B79B43E9DD49B58D1FFF5D /* SoftKeyboardHost.swift in Sources */,
+				23902BFD12AAA06E46B30704 /* SystemConfigurationCompat.m in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -243,12 +247,14 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/../../target/aarch64-apple-ios/release",
+					"$(HOME)/vcpkg/installed/arm64-ios/lib",
 				);
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"-force_load",
 					"$(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
 					"-lc++",
+					"-ljpeg",
 					"-lsqlite3",
 					"-framework",
 					VideoToolbox,
@@ -366,12 +372,14 @@
 				);
 				LIBRARY_SEARCH_PATHS = (
 					"$(SRCROOT)/../../target/aarch64-apple-ios/release",
+					"$(HOME)/vcpkg/installed/arm64-ios/lib",
 				);
 				ONLY_ACTIVE_ARCH = YES;
 				OTHER_LDFLAGS = (
 					"-force_load",
 					"$(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a",
 					"-lc++",
+					"-ljpeg",
 					"-lsqlite3",
 					"-framework",
 					VideoToolbox,

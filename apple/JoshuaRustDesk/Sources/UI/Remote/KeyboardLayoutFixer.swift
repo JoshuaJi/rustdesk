@@ -1,21 +1,29 @@
 import SwiftUI
 import UIKit
 
-/// Prevents the system keyboard from resizing the remote-session layout.
-/// Attached as a zero-size background view via `disableKeyboardLayoutShift()`.
+/// Prevents the system keyboard from resizing the whole remote-session layout
+/// and reports its bottom overlap so the canvas can avoid it explicitly.
+/// Attached as a zero-size background view via `disableKeyboardLayoutShift(keyboardOverlap:)`.
 ///
 /// SwiftUI `.ignoresSafeArea(.keyboard)` alone is not enough inside
 /// `fullScreenCover` — UIKit still applies keyboard safe-area insets to the
-/// hosting controller. We strip those and re-pin the presentation root to the
-/// full window bounds when the keyboard appears.
+/// hosting controller. We strip those, re-pin the presentation root to the
+/// full window bounds, and let only the remote canvas consume the overlap.
 struct KeyboardLayoutFixer: UIViewRepresentable {
+    @Binding var keyboardOverlap: CGFloat
+
     func makeUIView(context: Context) -> FixerView {
-        FixerView()
+        let view = FixerView()
+        view.onKeyboardOverlapChange = { keyboardOverlap = $0 }
+        return view
     }
 
-    func updateUIView(_ uiView: FixerView, context: Context) {}
+    func updateUIView(_ uiView: FixerView, context: Context) {
+        uiView.onKeyboardOverlapChange = { keyboardOverlap = $0 }
+    }
 
     final class FixerView: UIView {
+        var onKeyboardOverlapChange: ((CGFloat) -> Void)?
         private var observers: [NSObjectProtocol] = []
 
         override init(frame: CGRect) {
@@ -36,7 +44,10 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
         override func didMoveToWindow() {
             super.didMoveToWindow()
             uninstallObservers()
-            guard window != nil else { return }
+            guard window != nil else {
+                onKeyboardOverlapChange?(0)
+                return
+            }
             applyAll()
             installObservers()
             DispatchQueue.main.async { [weak self] in
@@ -58,7 +69,8 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
                     forName: name,
                     object: nil,
                     queue: .main
-                ) { [weak self] _ in
+                ) { [weak self] notification in
+                    self?.updateKeyboardOverlap(from: notification)
                     self?.applyAll()
                 })
             }
@@ -138,6 +150,27 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
             CATransaction.commit()
         }
 
+        private func updateKeyboardOverlap(from notification: Notification) {
+            guard let window else {
+                onKeyboardOverlapChange?(0)
+                return
+            }
+            if notification.name == UIResponder.keyboardDidHideNotification {
+                onKeyboardOverlapChange?(0)
+                return
+            }
+            guard
+                let value = notification.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue
+            else {
+                return
+            }
+            let frame = window.convert(value.cgRectValue, from: nil)
+            let intersection = window.bounds.intersection(frame)
+            let touchesBottom = frame.maxY >= window.bounds.maxY - 1
+            let overlap = touchesBottom && !intersection.isNull ? intersection.height : 0
+            onKeyboardOverlapChange?(max(0, overlap))
+        }
+
         private func findNearestViewController() -> UIViewController? {
             var r: UIResponder? = self
             while let cur = r {
@@ -150,8 +183,8 @@ struct KeyboardLayoutFixer: UIViewRepresentable {
 }
 
 extension View {
-    /// Soft keyboard floats without shifting remote session UI.
-    func disableKeyboardLayoutShift() -> some View {
-        background(KeyboardLayoutFixer())
+    /// Keep the session fixed while exposing the keyboard overlap to its canvas.
+    func disableKeyboardLayoutShift(keyboardOverlap: Binding<CGFloat>) -> some View {
+        background(KeyboardLayoutFixer(keyboardOverlap: keyboardOverlap))
     }
 }

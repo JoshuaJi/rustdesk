@@ -32,10 +32,12 @@ targets:
           - $(SRCROOT)/Bridging
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/../../target/aarch64-apple-ios/release
+          - $(HOME)/vcpkg/installed/arm64-ios/lib
         OTHER_LDFLAGS:
           - -force_load
           - $(SRCROOT)/../../target/aarch64-apple-ios/release/liblibrustdesk.a
           - -lc++
+          - -ljpeg
           - -lsqlite3
           - -framework
           - VideoToolbox

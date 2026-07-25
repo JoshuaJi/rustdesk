@@ -5,13 +5,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${HOME}/development/flutter/bin:${HOME}/.cargo/bin:/opt/homebrew/bin:${PATH}"
 export VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}"
-export IPHONEOS_DEPLOYMENT_TARGET=13.0
+export IPHONEOS_DEPLOYMENT_TARGET=16.0
 export RUSTFLAGS="${RUSTFLAGS:--C link-arg=-Wl,-undefined,dynamic_lookup}"
 
 cd "$ROOT"
 echo "==> Building liblibrustdesk.a (aarch64-apple-ios, flutter+hwcodec)"
 rustup target add aarch64-apple-ios >/dev/null
 cargo build --locked --features flutter,hwcodec --release --target aarch64-apple-ios --lib
+
+if [[ "${1:-}" == "rust-only" ]]; then
+  echo "Built Rust core for Xcode"
+  exit 0
+fi
 
 echo "==> Generating Xcode project (apple/JoshuaRustDesk)"
 cd apple/JoshuaRustDesk

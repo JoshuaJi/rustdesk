@@ -14,6 +14,8 @@ struct RemoteSessionView: View {
     @State private var railHidden = false
     /// Compact overflow tools panel (replaces SwiftUI `Menu`, which is dead under overFullScreen).
     @State private var showToolsPanel = false
+    /// Bottom-anchored system keyboard overlap reported by the UIKit layout bridge.
+    @State private var keyboardOverlap: CGFloat = 0
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
 
     private var isCompact: Bool { hSize == .compact }
@@ -97,12 +99,15 @@ struct RemoteSessionView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
                 .ignoresSafeArea(.keyboard)
+                // Keep the desktop fitted into all space above a docked keyboard.
+                // Floating iPad keyboards report no bottom overlap.
+                .padding(.bottom, keyboardOverlap)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black.ignoresSafeArea())
         .ignoresSafeArea(.keyboard, edges: .all)
-        .disableKeyboardLayoutShift()
+        .disableKeyboardLayoutShift(keyboardOverlap: $keyboardOverlap)
         .statusBarHidden(true)
         .onAppear {
             // Phone: rail visible, advanced tools in ⋯ panel.

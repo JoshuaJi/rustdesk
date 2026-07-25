@@ -458,7 +458,8 @@ final class TouchMetalView: MTKView, UIKeyInput, RemoteGestureEngineDelegate {
     //  • key-window restore killing the keyboard
     //  • full-screen overlay blocking sidebar taps
     //  • UIHostingController stripping unmanaged sibling text fields
-    // Layout push is blocked by RemoteSessionHostController.
+    // Layout push is blocked by RemoteSessionHostController; RemoteSessionView
+    // explicitly resizes this canvas to the area above a docked keyboard.
 
     /// Always claim FR: HW keys when soft keyboard off, system KB when on.
     override var canBecomeFirstResponder: Bool { true }

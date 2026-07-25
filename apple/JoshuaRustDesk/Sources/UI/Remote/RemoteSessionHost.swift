@@ -1,14 +1,16 @@
 import SwiftUI
 import UIKit
 
-/// UIKit host for the remote session that **never** shrinks for the software keyboard.
+/// UIKit host that keeps the remote-session shell fixed while the canvas handles
+/// the software-keyboard overlap explicitly.
 ///
 /// SwiftUI `fullScreenCover` + `.ignoresSafeArea(.keyboard)` is insufficient: UIKit still
 /// applies keyboard safe-area insets to the presentation hosting controller, which pushes
 /// the whole HStack (sidebar + canvas) upward. This controller:
 /// 1. Excludes `.keyboard` from `safeAreaRegions` (iOS 16.4+)
 /// 2. Forces `view.frame = window.bounds` on every layout pass while active
-/// 3. Is presented with `.overFullScreen` so the home stack is not resized either
+/// 3. Leaves the canvas to inset itself by the measured keyboard overlap
+/// 4. Is presented with `.overFullScreen` so the home stack is not resized either
 final class RemoteSessionHostController: UIHostingController<RemoteSessionView> {
     private var keyboardObservers: [NSObjectProtocol] = []
 
