@@ -2,31 +2,42 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject var bridge: RustDeskBridge
-    @AppStorage("id_server") private var idServer = "rustdesk.joshuajixu.com"
+    /// Empty ID server / key → official public RustDesk (rs-ny.rustdesk.com).
+    @AppStorage("id_server") private var idServer = ""
     @AppStorage("relay_server") private var relayServer = ""
-    @AppStorage("key") private var key = "8pshWJctNSCRvhn4dqhFoMWspUo1VGDF0oFUo2xozN0="
+    @AppStorage("key") private var key = ""
     @AppStorage("enable_udp_punch") private var enableUdpPunch = true
     @AppStorage("enable_ipv6_punch") private var enableIpv6Punch = false
     @AppStorage("enable_hwcodec") private var enableHwcodec = true
     @AppStorage("codec_preference") private var codecPreference = "h264"
 
+    private var usingOfficialServer: Bool {
+        idServer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     var body: some View {
         Form {
             Section {
-                TextField("ID server", text: $idServer)
+                TextField("ID server", text: $idServer, prompt: Text("Official (empty)"))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textContentType(.URL)
-                TextField("Relay server (optional)", text: $relayServer)
+                TextField("Relay server", text: $relayServer, prompt: Text("Optional"))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .textContentType(.URL)
-                TextField("Key", text: $key)
+                TextField("Key", text: $key, prompt: Text("Official (empty)"))
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .font(.body.monospaced())
             } header: {
                 Text("ID / Relay server")
+            } footer: {
+                if usingOfficialServer {
+                    Text("Empty ID server uses the official RustDesk public network (rs-ny.rustdesk.com). Fill these only for a self-hosted server.")
+                } else {
+                    Text("Custom ID server. Clear ID server and key to return to the official public network.")
+                }
             }
 
             Section {
@@ -55,16 +66,20 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Apply to Rust core") {
+                Button("Apply network settings") {
                     bridge.pushNetworkOptionsToRust()
                 }
             }
 
             Section("About") {
                 Text("Native Swift client (no Flutter)")
-                Text("Self-host: rustdesk.joshuajixu.com")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                Text(
+                    usingOfficialServer
+                        ? "Network: official RustDesk public servers"
+                        : "Network: \(idServer.trimmingCharacters(in: .whitespacesAndNewlines))"
+                )
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Settings")

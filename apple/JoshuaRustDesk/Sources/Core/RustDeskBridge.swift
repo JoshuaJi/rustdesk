@@ -19,8 +19,8 @@ final class RustDeskBridge: ObservableObject {
         let appDir = docs.path
         rd_main_init(appDir, "")
 
-        // Self-host defaults (override in Settings).
-        applySelfHostDefaultsIfNeeded()
+        // Empty ID/key/relay → official public servers (rs-ny.rustdesk.com + RS_PUB_KEY).
+        applyNetworkDefaultsIfNeeded()
 
         if let idPtr = rd_main_get_id() {
             localId = String(cString: idPtr)
@@ -29,26 +29,54 @@ final class RustDeskBridge: ObservableObject {
         status = "Rust core ready"
     }
 
-    func applySelfHostDefaultsIfNeeded() {
+    /// Empty ID server / key means official RustDesk public infra.
+    /// Self-host by filling Settings (ID server + key).
+    func applyNetworkDefaultsIfNeeded() {
         let defaults = UserDefaults.standard
-        if defaults.string(forKey: "id_server") == nil {
-            defaults.set("rustdesk.joshuajixu.com", forKey: "id_server")
-            defaults.set("8pshWJctNSCRvhn4dqhFoMWspUo1VGDF0oFUo2xozN0=", forKey: "key")
+
+        // One-time: drop the previous hard-coded self-host seed so the product
+        // default is official (empty fields). Custom self-host values that are
+        // not exactly the old seed are left alone.
+        if defaults.string(forKey: "id_server") == Self.legacySelfHostServer {
+            defaults.set("", forKey: "id_server")
+        }
+        if defaults.string(forKey: "key") == Self.legacySelfHostKey {
+            defaults.set("", forKey: "key")
+        }
+
+        if defaults.object(forKey: "id_server") == nil {
+            defaults.set("", forKey: "id_server")
+        }
+        if defaults.object(forKey: "key") == nil {
+            defaults.set("", forKey: "key")
+        }
+        if defaults.object(forKey: "relay_server") == nil {
+            defaults.set("", forKey: "relay_server")
+        }
+        if defaults.object(forKey: "enable_udp_punch") == nil {
             defaults.set(true, forKey: "enable_udp_punch")
         }
+
         pushNetworkOptionsToRust()
     }
 
     func pushNetworkOptionsToRust() {
         let d = UserDefaults.standard
-        let server = d.string(forKey: "id_server") ?? ""
-        let key = d.string(forKey: "key") ?? ""
+        // Trim whitespace so accidental spaces don't disable official fallback.
+        let server = (d.string(forKey: "id_server") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = (d.string(forKey: "key") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let relay = (d.string(forKey: "relay_server") ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Empty custom-rendezvous-server → Rust uses RENDEZVOUS_SERVERS (official).
+        // Empty key → Rust get_key() falls back to RS_PUB_KEY.
         rd_main_set_option("custom-rendezvous-server", server)
         rd_main_set_option("key", key)
-        // Relay empty → derived from ID server by Rust when needed
-        if let relay = d.string(forKey: "relay_server"), !relay.isEmpty {
-            rd_main_set_option("relay-server", relay)
-        }
+        // Always set so clearing Settings actually clears a prior self-host relay.
+        rd_main_set_option("relay-server", relay)
+
         let punch = d.bool(forKey: "enable_udp_punch")
         // Local option via main option path — punch is local config in Flutter;
         // for native we set as option string used by get_local_option path if available.
@@ -63,6 +91,11 @@ final class RustDeskBridge: ObservableObject {
         let pref = d.string(forKey: "codec_preference") ?? "h264"
         rd_main_set_option("codec-preference", pref)
     }
+
+    /// Previous product seed — cleared on bootstrap so default is official.
+    private static let legacySelfHostServer = "rustdesk.joshuajixu.com"
+    private static let legacySelfHostKey =
+        "8pshWJctNSCRvhn4dqhFoMWspUo1VGDF0oFUo2xozN0="
 
     func getOption(_ key: String) -> String {
         guard let p = rd_main_get_option(key) else { return "" }
